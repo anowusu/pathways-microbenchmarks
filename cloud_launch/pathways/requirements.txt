@@ -1,0 +1,10 @@
+# Python dependencies of the Pathways launcher (generate_workload.py). These
+# run on your workstation, not inside the benchmark image.
+#
+# PathwaysJobSet.add_user_workload() and the head/worker pod-spec kwargs used by
+# generate_workload.py are newer than the latest pathwaysutils release on PyPI
+# (0.1.12), so the launcher pins a pathways-utils commit from GitHub. Move this
+# to a PyPI release (e.g. pathwaysutils[gke]>=0.1.13) once one ships them.
+pathwaysutils[gke] @ git+https://github.com/AI-Hypercomputer/pathways-utils.git@4044d88e4e12932bdd09eb34b30e7fd1108a6a49
+kubernetes
+pyyaml

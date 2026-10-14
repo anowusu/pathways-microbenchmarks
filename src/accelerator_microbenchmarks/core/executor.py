@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from accelerator_microbenchmarks.core import config as config_module
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import profiler
 from accelerator_microbenchmarks.core import throttle_profiler
 import jax
@@ -18,6 +19,21 @@ import numpy as np
 # captures the post-soak throttled state immediately after Phase 2 soak.
 _BASELINE_TRACE_WINDOW_SUBDIR = "baseline_window"
 _WORST_TRACE_WINDOW_SUBDIR = "worst_window"
+
+
+def _trace_device_id(device: jax.Device) -> Optional[int]:
+  """Returns the id that names `device`'s `/device:TPU:<id>` trace plane.
+
+  McJAX traces name planes by the host-local hardware id. Pathways traces are
+  read through `pathways_trace`, which names planes by global core id, i.e.
+  the JAX device id.
+
+  Args:
+    device: The JAX device to look up in the trace.
+  """
+  if pathways.is_active():
+    return device.id
+  return device.local_hardware_id
 
 
 class BaseRunExecutor:
@@ -48,7 +64,10 @@ class BaseRunExecutor:
   ) -> tuple[list[float], int]:
     """Executes the standard single-step measurement loop."""
     ctx = contextlib.nullcontext()
-    if self.benchmark.xprof_config.xprof_timing and local_xprof_dir is not None:
+    traced = (
+        self.benchmark.xprof_config.xprof_timing and local_xprof_dir is not None
+    )
+    if traced:
       ctx = jax.profiler.trace(local_xprof_dir, create_perfetto_link=False)
 
     raw_times: list[float] = []
@@ -56,6 +75,11 @@ class BaseRunExecutor:
     loop_start = time.perf_counter()
 
     with ctx:
+      if traced and pathways.is_active():
+        # Pathways starts the TPU device tracers asynchronously; give them time
+        # so that the first measured step is captured.
+        time.sleep(pathways.trace_start_delay_s())
+        loop_start = time.perf_counter()
       while actual_runs < self.config.num_runs or (
           time.perf_counter() - loop_start < self.config.min_duration_s
       ):
@@ -77,7 +101,7 @@ class BaseRunExecutor:
     best_dev_id: Optional[int] = None
     best_median = -1.0
     for dev in jax.local_devices():
-      dev_id = dev.local_hardware_id
+      dev_id = _trace_device_id(dev)
       durs = profiler.parse_xprof_durations(
           trace_dir,
           self.benchmark.match_xprof_op_fallback,
@@ -116,7 +140,7 @@ class BaseRunExecutor:
     ):
       device_slices: list[list[float]] = []
       for dev in jax.local_devices():
-        dev_slice = _durations_for_device(dev.local_hardware_id)
+        dev_slice = _durations_for_device(_trace_device_id(dev))
         if dev_slice:
           device_slices.append(dev_slice)
       return (
@@ -126,7 +150,7 @@ class BaseRunExecutor:
       )
 
     measured_device = self.benchmark.get_device_to_measure()
-    return _durations_for_device(measured_device.local_hardware_id)
+    return _durations_for_device(_trace_device_id(measured_device))
 
   def get_xprof_durations(self, xprof_dir: str) -> list[float]:
     """Returns XProf kernel durations (ms) for the completed benchmark run."""

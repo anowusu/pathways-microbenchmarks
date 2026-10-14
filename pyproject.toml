@@ -19,6 +19,14 @@ dependencies = [
     "tensorflow",
 ]
 
+[project.optional-dependencies]
+# Pathways on Cloud client support (`pip install '.[pathways]'`): registers the
+# Pathways IFRT proxy backend and routes jax.profiler traces to the Pathways
+# workers. See docs/PATHWAYS.md.
+pathways = [
+    "pathwaysutils>=0.1.12",
+]
+
 [project.scripts]
 tpums = "accelerator_microbenchmarks.cli:main"
 

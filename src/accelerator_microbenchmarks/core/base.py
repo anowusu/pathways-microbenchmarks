@@ -10,6 +10,7 @@ from typing import Any, Callable, Generic, Optional, Sequence, TypeVar
 
 from accelerator_microbenchmarks.core import constants
 from accelerator_microbenchmarks.core import executor
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import platform
 from accelerator_microbenchmarks.core import profiler
 from accelerator_microbenchmarks.core import roofline
@@ -187,8 +188,10 @@ class BaseBenchmark(Generic[TConfig], abc.ABC):
     self.mesh: Optional[jax.sharding.Mesh] = mesh
     self.xprof_config: XprofConfig = xprof_config or XprofConfig()
     self._jit_fn = None
-    self._xprof_dir_actual: str = self.xprof_config.xprof_dir
-    self._xprof_dir_cns: str = self._xprof_dir_actual
+    # None means no XProf trace is collected (e.g. a Pathways run without a
+    # gs:// trace directory, see `pathways.resolve_xprof_dir`).
+    self._xprof_dir_actual: Optional[str] = self.xprof_config.xprof_dir
+    self._xprof_dir_cns: str = self.xprof_config.xprof_dir
     self.executor: executor.BaseRunExecutor = executor.create_executor(self)
 
   def _create_default_mesh(self) -> jax.sharding.Mesh:
@@ -319,9 +322,10 @@ class BaseBenchmark(Generic[TConfig], abc.ABC):
     xprof_dir = self._xprof_dir_actual
     cns_dir = self._xprof_dir_cns
 
-    xprof_url = profiler.upload_xprof_trace(xprof_dir, cns_dir)
-    if xprof_url:
-      metrics["xprof_url"] = xprof_url
+    if xprof_dir is not None:
+      xprof_url = profiler.upload_xprof_trace(xprof_dir, cns_dir)
+      if xprof_url:
+        metrics["xprof_url"] = xprof_url
 
     measured_device = self.get_device_to_measure()
     is_owner = jax.process_index() == measured_device.process_index
@@ -339,7 +343,9 @@ class BaseBenchmark(Generic[TConfig], abc.ABC):
     )
 
     # 1. Parse local XProf trace on relevant hosts
-    should_parse = not self.requires_multihost_sync or is_owner
+    should_parse = xprof_dir is not None and (
+        not self.requires_multihost_sync or is_owner
+    )
     local_avg, local_p50, local_p90, local_std = 0.0, 0.0, 0.0, 0.0
 
     if should_parse:
@@ -361,6 +367,8 @@ class BaseBenchmark(Generic[TConfig], abc.ABC):
           print("Warning: No XProf device timings found locally.")
       except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"Error parsing local XProf trace: {e}")
+    elif xprof_dir is None:
+      print("Note: No XProf trace was collected; skipping XProf parsing.")
     else:
       print(
           f"Note: Measured device {measured_device.id} is on remote Host"
@@ -513,11 +521,19 @@ class BaseBenchmark(Generic[TConfig], abc.ABC):
       ):
         local_xprof_dir = cns_xprof_dir
 
-      self._xprof_dir_actual = local_xprof_dir
+      # On Pathways on Cloud the trace is written by the Pathways workers, which
+      # require a gs:// directory; otherwise XProf collection is skipped (None).
+      self._xprof_dir_actual = pathways.resolve_xprof_dir(local_xprof_dir)
       self._xprof_dir_cns = cns_xprof_dir
-      print(
-          f"Collecting xprof trace locally to {local_xprof_dir} across runs..."
-      )
+      if self._xprof_dir_actual is not None and pathways.is_active():
+        print(
+            "Pathways on Cloud: collecting xprof trace from the Pathways"
+            f" workers to {self._xprof_dir_actual} across runs..."
+        )
+      elif self._xprof_dir_actual is not None:
+        print(
+            f"Collecting xprof trace locally to {local_xprof_dir} across runs..."
+        )
 
     start_ts = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
 
@@ -528,7 +544,7 @@ class BaseBenchmark(Generic[TConfig], abc.ABC):
         self._xprof_dir_actual if self.xprof_config.xprof_timing else None,
     )
 
-    if self.xprof_config.xprof_timing:
+    if self.xprof_config.xprof_timing and self._xprof_dir_actual is not None:
       print("Xprof trace collected.")
 
     end_ts = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()

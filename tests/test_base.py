@@ -437,6 +437,65 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIsNone(result.metrics["xprof_p50_ms"])
     self.assertGreater(result.metrics["wall_clock_avg_ms"], 0.0)
 
+  @unittest.mock.patch(
+      "accelerator_microbenchmarks.core.pathways.is_active", return_value=True
+  )
+  @unittest.mock.patch(
+      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  )
+  @unittest.mock.patch(
+      "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
+  )
+  @unittest.mock.patch("jax.profiler.trace")
+  def test_pathways_local_xprof_dir_skips_trace(
+      self, mock_trace, mock_upload, mock_parse_durations, _
+  ):
+    """Tests that Pathways runs skip XProf when the trace dir is not on GCS."""
+    config = base.BaseBenchmarkParams(warmup_tries=1, num_runs=2)
+    xprof_config = base.XprofConfig(
+        xprof_timing=True, xprof_dir="/tmp/test_xprof"
+    )
+    bm = DummyBenchmark(config=config, xprof_config=xprof_config)
+    result = bm.run()
+
+    mock_trace.assert_not_called()
+    mock_upload.assert_not_called()
+    mock_parse_durations.assert_not_called()
+    self.assertIsNone(result.metrics["xprof_avg_ms"])
+    self.assertIsNone(result.metrics["xprof_p50_ms"])
+    self.assertGreater(result.metrics["wall_clock_avg_ms"], 0.0)
+    self.assertEqual(result.metrics["actual_runs"], 2)
+
+  @unittest.mock.patch(
+      "accelerator_microbenchmarks.core.pathways.is_active", return_value=True
+  )
+  @unittest.mock.patch(
+      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  )
+  @unittest.mock.patch(
+      "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
+  )
+  @unittest.mock.patch("jax.profiler.trace")
+  def test_pathways_gcs_xprof_dir_collects_trace(
+      self, mock_trace, mock_upload, mock_parse_durations, _
+  ):
+    """Tests that Pathways runs trace into a per-benchmark gs:// directory."""
+    mock_trace.return_value = contextlib.nullcontext()
+    mock_upload.return_value = None
+    mock_parse_durations.return_value = [2.0, 2.0, 2.0]
+
+    config = base.BaseBenchmarkParams(warmup_tries=1, num_runs=3)
+    xprof_config = base.XprofConfig(
+        xprof_timing=True, xprof_dir="gs://bucket/xprof"
+    )
+    bm = DummyBenchmark(config=config, xprof_config=xprof_config)
+    result = bm.run()
+
+    mock_trace.assert_called_once()
+    self.assertTrue(mock_trace.call_args[0][0].startswith("gs://bucket/xprof/"))
+    mock_parse_durations.assert_called_once()
+    self.assertEqual(result.metrics["xprof_p50_ms"], 2.0)
+
   @unittest.mock.patch("jax.experimental.multihost_utils.broadcast_one_to_all")
   @unittest.mock.patch(
       "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"

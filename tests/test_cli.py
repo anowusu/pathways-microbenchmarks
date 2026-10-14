@@ -58,6 +58,8 @@ class TestCli(parameterized.TestCase):
           "jax_version",
           "jaxlib_version",
           "libtpu_version",
+          "runtime",
+          "runtime_version",
       }
       self.assertEqual(set(data.keys()), expected_keys)
       self.assertEqual(data["tpu_type"], "tpu7x")
@@ -70,6 +72,8 @@ class TestCli(parameterized.TestCase):
       self.assertIsInstance(data["jax_version"], str)
       self.assertIsInstance(data["jaxlib_version"], str)
       self.assertIsInstance(data["libtpu_version"], str)
+      self.assertEqual(data["runtime"], "mcjax")
+      self.assertIsInstance(data["runtime_version"], str)
 
   def test_platform_describe_runtime_error_exits(self):
     """Verifies that `tpums platform describe` outputs to stderr and exits on RuntimeError."""

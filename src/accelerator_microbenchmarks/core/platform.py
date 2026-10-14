@@ -15,6 +15,7 @@ import importlib.metadata
 import platform as py_platform
 from typing import Sequence
 
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import system
 import jax
 
@@ -34,6 +35,14 @@ class PlatformInfo:
   jax_version: str
   jaxlib_version: str
   libtpu_version: str
+  # Runtime that executed the TPU programs: "mcjax" (multi-controller JAX, one
+  # process per TPU VM) or "pathways" (single-controller Pathways on Cloud
+  # client). On Pathways `libtpu_version` describes the client process only;
+  # the TPU runtime version is in `runtime_version`.
+  runtime: str = pathways.RUNTIME_MCJAX
+  # Version string reported by the runtime: the PJRT/libtpu platform version
+  # for McJAX, or the Pathways server build (e.g. "Pathways cl/123").
+  runtime_version: str = ""
 
 
 def _get_package_version(module_name: str, *fallback_pkg_names: str) -> str:
@@ -97,10 +106,12 @@ def _get_topology(
 
 def get_platform_info() -> PlatformInfo:
   """Extracts structured TPU hardware topology, process ranks, and software versions."""
-  try:
-    jax.distributed.initialize()
-  except Exception:  # pylint: disable=broad-exception-caught
-    pass
+  if not pathways.is_active():
+    # Pathways is single-controller, so there is no coordinator to start.
+    try:
+      jax.distributed.initialize()
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
 
   try:
     backend = jax.default_backend()
@@ -112,7 +123,13 @@ def get_platform_info() -> PlatformInfo:
         " pip install jax jaxlib libtpu-nightly"
     ) from e
 
-  if backend != "tpu":
+  # The Pathways IFRT proxy forwards the server's platform name, which is
+  # "tpu" for TPU slices. Some client/server combinations report "proxy"
+  # instead, which also means TPU devices behind a Pathways proxy.
+  is_tpu_backend = backend == "tpu" or (
+      pathways.is_active() and backend == pathways.PROXY_PLATFORM
+  )
+  if not is_tpu_backend:
     raise RuntimeError(
         "TPUMS requires TPU accelerator hardware, but detected JAX backend:"
         f" '{backend}'. "
@@ -154,5 +171,7 @@ def get_platform_info() -> PlatformInfo:
       jax_version=_get_package_version("jax"),
       jaxlib_version=_get_package_version("jaxlib"),
       libtpu_version=_get_package_version("libtpu", "libtpu-nightly"),
+      runtime=pathways.runtime_name(),
+      runtime_version=pathways.runtime_version(),
   )
 

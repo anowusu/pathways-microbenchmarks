@@ -11,6 +11,7 @@ from accelerator_microbenchmarks.benchmarks import benchmark_loader
 from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import config
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import platform
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import report
@@ -119,17 +120,38 @@ def set_xla_flags(
   print(
       f"RUNTIME_CFG: LIBTPU_INIT_ARGS={os.environ.get('LIBTPU_INIT_ARGS', '')}"
   )
+  if pathways.is_requested() and flags_list:
+    # On Pathways the client process has no libtpu, so LIBTPU_INIT_ARGS set
+    # here does nothing. The op_flags.yaml entries are TPU *compilation* flags
+    # and Pathways compiles inside the pathways-proxy container, so they must
+    # be passed to the proxy instead (cloud_launch/pathways does this).
+    print(
+        "Note: Pathways on Cloud ignores LIBTPU_INIT_ARGS in the client. Pass"
+        " these flags to the pathways-proxy container instead (see"
+        " cloud_launch/pathways/README.md)."
+    )
 
 
 def init_jax_distributed():
   """Ensures JAX distributed coordinator is initialized."""
-  print("Initializing JAX distributed system...")
+  if pathways.is_active():
+    # Pathways is single-controller: this one process owns every device, so
+    # there is no multi-process coordinator to start.
+    print(
+        "Pathways on Cloud: single-controller client, skipping"
+        " jax.distributed.initialize(). Waiting for the Pathways TPU slice(s)..."
+    )
+  else:
+    print("Initializing JAX distributed system...")
+    try:
+      jax.distributed.initialize()
+    except Exception as e:
+      print(f"Note: jax.distributed.initialize() failed or not needed: {e}")
   try:
-    jax.distributed.initialize()
-  except Exception as e:
-    print(f"Note: jax.distributed.initialize() failed or not needed: {e}")
-  try:
-    devices = jax.devices()
+    # On Pathways, exit instead of hanging if the slice never becomes ready.
+    devices = (
+        pathways.wait_for_devices() if pathways.is_active() else jax.devices()
+    )
     print(f"JAX devices: {len(devices)} (e.g. {devices[:4]}...)")
   except Exception as e:
     print(f"Error initializing JAX devices: {e}")
@@ -146,6 +168,10 @@ def run_benchmarks(
     xprof_device_mode: str = constants.XprofDeviceMode.FIRST_DEVICE,
 ) -> List[base.BenchmarkResult]:
   """Core execution engine for typed benchmark task configurations."""
+  # Pathways on Cloud: register the proxy backend if JAX_PLATFORMS asks for it
+  # (no-op otherwise, and a no-op if the CLI already did it).
+  pathways.maybe_initialize()
+
   xprof_config = base.XprofConfig(
       xprof_timing=xprof_timing,
       xprof_dir=xprof_dir,

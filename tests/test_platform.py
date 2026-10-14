@@ -165,6 +165,78 @@ class PlatformTest(absltest.TestCase):
       ):
         platform.get_platform_info()
 
+  def test_get_platform_info_mcjax_runtime_fields(self):
+    """Verify McJAX runs report the mcjax runtime."""
+    mock_device = mock.MagicMock()
+    mock_device.platform = "tpu"
+    mock_device.device_kind = "TPU v6 lite"
+    mock_device.coords = (0, 0, 0)
+
+    with mock.patch("jax.distributed.initialize"), mock.patch(
+        "jax.default_backend", return_value="tpu"
+    ), mock.patch("jax.devices", return_value=[mock_device]), mock.patch.object(
+        platform.pathways, "runtime_version", return_value="libtpu 0.0.46"
+    ):
+      desc = platform.get_platform_info()
+
+    self.assertEqual(desc.runtime, "mcjax")
+    self.assertEqual(desc.runtime_version, "libtpu 0.0.46")
+
+  def test_get_platform_info_pathways(self):
+    """Verify Pathways clients skip distributed init and accept 'proxy'."""
+    devices = []
+    for x in range(4):
+      for y in range(8):
+        dev = mock.MagicMock()
+        dev.platform = "tpu"
+        dev.device_kind = "TPU v5 lite"
+        dev.coords = (x, y, 0)
+        devices.append(dev)
+
+    with mock.patch(
+        "jax.distributed.initialize"
+    ) as mock_dist_init, mock.patch.object(
+        platform.pathways, "is_active", return_value=True
+    ), mock.patch.object(
+        platform.pathways, "runtime_version", return_value="Pathways cl/123"
+    ), mock.patch(
+        "jax.default_backend", return_value="proxy"
+    ), mock.patch(
+        "jax.devices", return_value=devices
+    ), mock.patch(
+        "jax.device_count", return_value=32
+    ), mock.patch(
+        "jax.local_device_count", return_value=32
+    ), mock.patch(
+        "jax.process_count", return_value=1
+    ), mock.patch(
+        "jax.process_index", return_value=0
+    ):
+      desc = platform.get_platform_info()
+
+    mock_dist_init.assert_not_called()
+    self.assertEqual(desc.tpu_type, system.TpuVersion.V5E)
+    self.assertEqual(desc.topology, "4x8")
+    self.assertEqual(desc.total_devices, 32)
+    self.assertEqual(desc.process_count, 1)
+    self.assertEqual(desc.runtime, "pathways")
+    self.assertEqual(desc.runtime_version, "Pathways cl/123")
+
+  def test_get_platform_info_proxy_backend_requires_pathways(self):
+    """Verify a 'proxy' backend is rejected unless Pathways is initialized."""
+    mock_device = mock.MagicMock()
+    mock_device.device_kind = "TPU v5 lite"
+
+    with mock.patch("jax.distributed.initialize"), mock.patch.object(
+        platform.pathways, "is_active", return_value=False
+    ), mock.patch("jax.default_backend", return_value="proxy"), mock.patch(
+        "jax.devices", return_value=[mock_device]
+    ):
+      with self.assertRaisesRegex(
+          RuntimeError, "TPUMS requires TPU accelerator"
+      ):
+        platform.get_platform_info()
+
   def test_get_platform_info_error_not_masked(self):
     """Verify unexpected exceptions outside jax.devices() are not masked."""
     mock_device = mock.MagicMock()

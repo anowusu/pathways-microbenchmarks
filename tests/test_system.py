@@ -30,6 +30,13 @@ class SystemTest(absltest.TestCase):
           system.TpuVersion.V6E,
       )
 
+    # Pathways on Cloud and libtpu report v5e as "TPU v5 lite" or "TPU v5e".
+    for device_kind in ("v5e", "V5E", "TPU v5e", "TPU v5 lite"):
+      self.assertEqual(
+          system.TpuVersion.from_device_kind(device_kind),
+          system.TpuVersion.V5E,
+      )
+
   def test_tpu_version_from_device_kind_is_idempotent_on_enum(self):
     """Verify that an already resolved TpuVersion is returned unchanged."""
     self.assertIs(
@@ -135,6 +142,10 @@ class SystemTest(absltest.TestCase):
     self.assertEqual(v6e_spec.name, system.TpuVersion.V6E)
     self.assertEqual(v6e_spec, system.V6E_HARDWARE_SPEC)
 
+    v5e_spec = system.get_hardware_spec(system.TpuVersion.V5E)
+    self.assertEqual(v5e_spec.name, system.TpuVersion.V5E)
+    self.assertEqual(v5e_spec, system.V5E_HARDWARE_SPEC)
+
   def test_get_hardware_spec_from_jax_device_kind(self):
     """Verify that JAX device_kind strings resolve to the right generation."""
     self.assertEqual(
@@ -224,6 +235,31 @@ class SystemTest(absltest.TestCase):
     # Test HBM stats
     self.assertEqual(hw_spec.hbm.peak_bw_gb_s, 1638.4)
     self.assertEqual(hw_spec.peak_hbm_bandwidth_per_device, 1638.4)
+
+  def test_hardware_spec_v5e_presets(self):
+    """Verify that the V5E_HARDWARE_SPEC preset has correct values."""
+    hw_spec = system.V5E_HARDWARE_SPEC
+    self.assertEqual(hw_spec.name, system.TpuVersion.V5E)
+    self.assertEqual(hw_spec.topology_dimension, 2)
+    self.assertEqual(hw_spec.devices_per_chip, 1)
+
+    # Test compute stats
+    self.assertEqual(
+        hw_spec.tflops.peak_tflops_per_device["bfloat16"], 197.0
+    )
+    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["float32"], 98.5)
+    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["int8"], 394.0)
+    # v5e has no native FP8, INT4 or FP4 MXU support.
+    for dtype in ("float8_e5m2", "float8_e4m3fn", "int4", "float4_e2m1fn"):
+      self.assertIsNone(hw_spec.tflops.peak_tflops_per_device[dtype])
+
+    # Test ICI stats
+    self.assertEqual(hw_spec.ici.unidirectional_link_bw_gb_s, 400.0)
+    self.assertTrue(hw_spec.ici.bidirectional)
+
+    # Test HBM stats
+    self.assertEqual(hw_spec.hbm.peak_bw_gb_s, 819.2)
+    self.assertEqual(hw_spec.peak_hbm_bandwidth_per_device, 819.2)
 
   def test_hardware_spec_hbm_none(self):
     """Verify peak_hbm_bandwidth_per_device returns 0.0 when HBM is None or devices_per_chip <= 0."""

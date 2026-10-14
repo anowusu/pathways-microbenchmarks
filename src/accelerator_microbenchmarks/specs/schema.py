@@ -21,6 +21,7 @@ class TpuVersion(str, enum.Enum):
 
   TPU7X = "tpu7x"
   V6E = "v6e"
+  V5E = "v5e"
 
   def __str__(self) -> str:
     return str(self.value)
@@ -51,6 +52,8 @@ class TpuVersion(str, enum.Enum):
       return cls.TPU7X
     if normalized in ("v6e", "tpu v6e", "tpu v6 lite"):
       return cls.V6E
+    if normalized in ("v5e", "tpu v5e", "tpu v5 lite"):
+      return cls.V5E
     raise ValueError(
         f"Unsupported TPU device_kind '{device_kind}'. Available versions:"
         f" {[version.value for version in cls]}"

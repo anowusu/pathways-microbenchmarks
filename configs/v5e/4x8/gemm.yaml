@@ -1,0 +1,12 @@
+benchmark:
+  name: gemm
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 5
+    in_dtype: bfloat16
+    out_dtype: bfloat16
+    k: 4096
+    n: 4096
+  sweep:
+    m: [8192, 16384, 32768]

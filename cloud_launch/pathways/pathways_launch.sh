@@ -46,6 +46,16 @@ if [ -z "${1:-}" ]; then
 fi
 
 CONFIG="$1"
+if [ ! -f "${SCRIPT_DIR}/../../${CONFIG}" ]; then
+  echo "ERROR: ${CONFIG} not found (give the path relative to the repository root)."
+  exit 1
+fi
+for var in PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION GCS_BUCKET TPUMS_IMAGE; do
+  if [[ "${!var}" == *"<ADD_"* ]]; then
+    echo "ERROR: ${var} is not set (${!var}); export it or edit common.sh."
+    exit 1
+  fi
+done
 CONFIG_NAME="$(basename "${CONFIG}" .yaml | tr '_.' '--' | tr '[:upper:]' '[:lower:]')"
 RUN_NAME="${2:-tpums-pw-${CONFIG_NAME}}"
 RUN_NAME="$(echo "${RUN_NAME:0:40}" | sed 's/-*$//')"

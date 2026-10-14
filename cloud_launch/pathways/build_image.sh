@@ -25,6 +25,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+if [[ "${IMAGE_REPOSITORY}" == *"<ADD_"* ]]; then
+  echo "ERROR: IMAGE_REPOSITORY is not set (${IMAGE_REPOSITORY}); export it or edit common.sh."
+  exit 1
+fi
+
 GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD)"
 if [ -n "$(git -C "${REPO_ROOT}" status --porcelain)" ]; then
   echo "Warning: the checkout has uncommitted changes; tagging the image -dirty."

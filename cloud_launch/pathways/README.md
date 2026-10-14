@@ -62,7 +62,20 @@ flowchart LR
    `--op_flags=none` (or `OP_FLAGS=none`) disables this if a flag is not
    accepted by the proxy build.
 3. **Scheduling:** Kueue queue label, `priorityClassName` on head and worker
-   pods, head node-pool selector, and `activeDeadlineSeconds` on the head Job.
+   pods, head node-pool selector, and `activeDeadlineSeconds` on the head Job
+   (default 1800 s, like the Pathways CI workloads). The `user-workload`
+   container defaults to 8 CPU / 32G: the client only dispatches work, and a
+   smaller head pod leaves CPU node-pool quota for other jobs.
+4. **Client settings** passed as env: `TPUMS_CONFIG`, `TPUMS_GCS_OUTPUT_DIR`,
+   `TPUMS_XPROF_DIR`, and `TPUMS_PATHWAYS_VERSION` (recorded in
+   `runtime_version`). TPUMS also honors `TPUMS_PATHWAYS_STARTUP_TIMEOUT_S` and
+   `TPUMS_PATHWAYS_TRACE_START_DELAY_S` (see
+   [`docs/PATHWAYS.md`](../../docs/PATHWAYS.md)).
+
+`pathways_launch.sh` uses its own kubeconfig
+(`~/.kube/tpums-pathways-<cluster>.yaml`, override with `TPUMS_KUBECONFIG`),
+so it neither needs nor changes your current `kubectl` context, and it prints a
+Cloud Logging link with the logs of every container of the run.
 
 ## Quick start
 

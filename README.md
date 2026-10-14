@@ -484,6 +484,7 @@ Beyond interactive runs on a single Cloud TPU VM, TPUMS supports running both si
 
 - **[Single-Benchmark GKE Deployment (`docs/GKE.md`)](docs/GKE.md)**: Run any individual benchmark configuration across single-host or multi-host TPU topologies on GKE, with optional result and XProf trace export to Google Cloud Storage (GCS).
 - **[Multi-Topology Platform Automation (`docs/AUTOMATION.md`)](docs/AUTOMATION.md)**: Automatically orchestrate multiple benchmarks across multiple TPU topologies on GKE and aggregate results from GCS into consolidated cross-topology performance reports.
+- **[Pathways on Cloud (`docs/PATHWAYS.md`)](docs/PATHWAYS.md)**: Run the same configs from a single JAX client on [Pathways on Cloud](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro) (`JAX_PLATFORMS=proxy`), launched as a Pathways JobSet generated with pathways-utils' `PathwaysJobSet` ([`cloud_launch/pathways/`](cloud_launch/pathways/README.md)).
 
 ---
 
@@ -493,14 +494,17 @@ Beyond interactive runs on a single Cloud TPU VM, TPUMS supports running both si
 ```text
 accelerator_microbenchmarks/
 ├── automation/                 # Automated multi-topology GKE orchestration and report generation
+├── cloud_launch/
+│   └── pathways/               # Pathways on Cloud launcher (PathwaysJobSet, image build, run script)
 ├── configs/                    # Ready-to-use YAML configs and parameter sweeps
 │   ├── sample_configs/         # Introductory sweeps and validation configs
 │   ├── shapes/                 # Predefined matrix shape sweeps (CSV)
-│   └── tpu7x/, v6e/            # Hardware-specific single-host & multi-host topology configs
+│   └── tpu7x/, v6e/, v5e/      # Hardware-specific single-host & multi-host topology configs
 ├── docs/                       # Reference, deployment, and automation guides
 │   ├── AUTOMATION.md           # Automated multi-topology benchmark pipeline and reporting runbook
 │   ├── BENCHMARKS.md           # Per-benchmark parameters, metrics, and collective sharding concepts
-│   └── GKE.md                  # Single-benchmark GKE deployment and topology sizing guide
+│   ├── GKE.md                  # Single-benchmark GKE deployment and topology sizing guide
+│   └── PATHWAYS.md             # Running TPUMS on Pathways on Cloud: changes, results, limitations
 ├── pyproject.toml              # Build system, dependencies, and CLI entry point
 ├── results/                    # Default destination directory for CSV and JSON reports
 ├── templates/                  # Standalone deployment templates (e.g., GKE Job manifest)

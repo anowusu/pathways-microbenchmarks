@@ -16,11 +16,29 @@ export TOPOLOGY="${TOPOLOGY:-4x8}"      # Must match a TPU node pool's topology.
 export NUM_SLICES="${NUM_SLICES:-1}"
 
 # --- Pathways ------------------------------------------------------------------
-# Pathways server/proxy release. Pick the tag built for the JAX version pinned in
-# pyproject.toml (jax 0.11.1), e.g. 20261013-jax_0.11.1.
-export PATHWAYS_VERSION="${PATHWAYS_VERSION:-20261013-jax_0.11.1}"
-export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server}"
-export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server}"
+# Pathways server/proxy release source:
+#   rapid - Google-internal Rapid release in us-docker.pkg.dev/cloud-tpu-v2-images/pathways
+#           (tag format: <YYYYMMDD>-jax_<JAX_VERSION>, e.g. 20261013-jax_0.11.1).
+#   louhi - OSS Bazel release built by Louhi in us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod
+#           (tag format: <YYYYMMDD_HHMM>-jax_<JAX_VERSION>, e.g. 20261013_0917-jax_0.11.1).
+# Pick the tag built for the JAX version pinned in pyproject.toml (jax 0.11.1).
+export PATHWAYS_IMAGE_SOURCE="${PATHWAYS_IMAGE_SOURCE:-rapid}"
+case "${PATHWAYS_IMAGE_SOURCE}" in
+  rapid)
+    export PATHWAYS_VERSION="${PATHWAYS_VERSION:-20261013-jax_0.11.1}"
+    export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server}"
+    export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server}"
+    ;;
+  louhi|oss)
+    export PATHWAYS_VERSION="${PATHWAYS_VERSION:-20261013_0917-jax_0.11.1}"
+    export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/server}"
+    export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/proxy_server}"
+    ;;
+  *)
+    echo "ERROR: Unknown PATHWAYS_IMAGE_SOURCE='${PATHWAYS_IMAGE_SOURCE}' (expected 'rapid' or 'louhi')." >&2
+    exit 1
+    ;;
+esac
 
 # --- Scheduling (Kueue / priorities) -------------------------------------------
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"   # Empty: no Kueue label.

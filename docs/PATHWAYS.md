@@ -22,7 +22,7 @@ modes; Pathways mode is selected purely by the environment
 | JAX backend | `tpu` (libtpu in the TPUMS process) | `proxy` → Pathways resource manager + workers; the TPU runtime lives in the Pathways images |
 | Bootstrap | `jax.distributed.initialize()` | `pathwaysutils.initialize()` (registers the proxy backend and patches `jax.profiler`) |
 | Compilation | In each TPUMS process (libtpu) | In the `pathways-proxy` container |
-| `op_flags.yaml` flags | `LIBTPU_INIT_ARGS` in the TPUMS process | Arguments of the `pathways-proxy` container (done by the launcher) |
+| `op_flags.yaml` flags | `LIBTPU_INIT_ARGS` in the TPUMS process | `pathways-proxy` CLI args (with `--undefok`) **and** `LIBTPU_INIT_ARGS` on the Pathways containers, supporting both Rapid (static `libtpu`) and Louhi OSS (dynamic `/lib/libtpu.so`) images |
 | XProf traces | `jax.profiler` writes a local `*.trace.json.gz` that TPUMS parses | Pathways components write `*.xplane.pb` to a **gs://** directory; TPUMS parses the worker's TPU planes |
 | Wall-clock timing | Host dispatch + device time | Host dispatch + **client→proxy→worker round trip** + device time |
 
@@ -153,9 +153,21 @@ within 0.1%.
   are not comparable with McJAX.
 - **`gemm_throttling` / soaking executor** needs local thermal telemetry
   parsing; not supported on Pathways.
-- **Op flags** are passed to the proxy binary. A flag that the proxy build does
-  not define makes the proxy exit at startup; rerun with `OP_FLAGS=none` (or a
-  trimmed op flags file) in that case.
+- **Op flags (`op_flags.yaml`):** Both Rapid and Louhi OSS Pathways images are
+  supported: `generate_workload.py` sets `LIBTPU_INIT_ARGS` on `pathways-proxy`,
+  `pathways-rm`, and `pathways-worker` (parsed by `/lib/libtpu.so` in the Louhi
+  OSS build) and appends the flags with a matching `--undefok=...` to
+  `pathways-proxy` CLI `args` (parsed by the statically linked `proxy_server` in
+  the Rapid build). Set `OP_FLAGS=none` if testing custom flags that `libtpu`
+  itself rejects.
+- **Louhi OSS XProf TPU device planes:** The Louhi OSS `pathways_server` binary
+  (`us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/server`) is compiled
+  without the TPU device profiler factory (`if_with_tpu_support` in OSS Bazel),
+  so its worker `*.xplane.pb` files contain `/host:CPU` planes only (no
+  `/device:TPU:*` planes). On Louhi OSS images, TPUMS automatically logs a
+  warning, sets `xprof_*` columns to `None`, and reports all `wall_clock_*`
+  metrics cleanly. Full `xprof_*` device-time metrics require the Rapid release
+  images (`PATHWAYS_IMAGE_SOURCE=rapid`).
 - **Multi-slice:** the launcher supports `NUM_SLICES>1`, but the provided
   configs build single-slice meshes, and device planes are matched by
   per-slice core id.
@@ -163,3 +175,30 @@ within 0.1%.
   When the JobSet is re-admitted, the Pathways resource manager may restart and
   the slice never becomes ready; `wait_for_devices()` then fails the run after
   `TPUMS_PATHWAYS_STARTUP_TIMEOUT_S` so you can relaunch it.
+
+## Rapid release vs Louhi OSS Pathways images
+
+The launcher (`cloud_launch/pathways/common.sh` + `generate_workload.py`)
+supports both Pathways image release pipelines via `PATHWAYS_IMAGE_SOURCE`:
+
+| Aspect | Rapid release (`PATHWAYS_IMAGE_SOURCE=rapid`, default) | Louhi OSS release (`PATHWAYS_IMAGE_SOURCE=louhi` or `oss`) | How `generate_workload.py` handles both |
+| :--- | :--- | :--- | :--- |
+| **Artifact Registry** | `us-docker.pkg.dev/cloud-tpu-v2-images/pathways/{server,proxy_server}` | `us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/{server,proxy_server}` | `common.sh` selects the repository and default tag (`20261013-jax_0.11.1` for Rapid, `20261013_0917-jax_0.11.1` for Louhi OSS). |
+| **`libtpu` linking & `op_flags.yaml`** | Statically linked into `proxy_server`; parses `--xla_tpu_*` from `pathways-proxy` CLI `args` and ignores `LIBTPU_INIT_ARGS`. | Dynamically loads `/lib/libtpu.so` via `dlopen`; `--xla_tpu_*` flags live in `libtpu.so` (parsed from `LIBTPU_INIT_ARGS`) and are unknown to `proxy_server` CLI `args`. | Sets `LIBTPU_INIT_ARGS` on `pathways-proxy`, `pathways-rm`, and `pathways-worker` **and** passes `--undefok=<flag_names>` before the flags on `pathways-proxy` CLI `args`. |
+| **Intra-JobSet gRPC credentials** | Image env bakes `PATHWAYS_UNSAFE_UNSAFE_OVERRIDE_GRPC_CREDENTIALS=grpc_insecure_override` (`InsecureChannelCredentials`). | Built with `TSL_IS_IN_OSS=1` (`xla/python/ifrt_proxy/common/grpc_credentials.cc`), which defaults to `AltsCredentials` unless `TEST_UNDECLARED_OUTPUTS_DIR` is set. On standard GKE pod networks (no `hostNetwork: true`), ALTS handshakes time out. | Sets `TEST_UNDECLARED_OUTPUTS_DIR=/tmp` on `pathways-rm`, `pathways-proxy`, and `pathways-worker` so Louhi OSS selects insecure gRPC credentials inside the JobSet (no-op on Rapid). |
+| **Worker XProf traces (`*.xplane.pb`)** | Includes `/device:TPU:0..3` planes → reports both `wall_clock_*` and `xprof_*` device metrics. | Compiled without the TPU device tracer factory → records `/host:CPU` planes only; TPUMS reports `wall_clock_*` metrics and sets `xprof_*` to `None`. | `pathways_trace.py` and `profiler.py` gracefully fall back when `/device:TPU:*` planes are absent. |
+
+### Side-by-side validation: Rapid vs Louhi OSS (`v5e 4x8`, 32 chips)
+
+Both image sources were validated on `pw-scale-test-v5e-32` (`us-south1`) with
+the exact same launcher command, switching only `PATHWAYS_IMAGE_SOURCE=rapid` vs
+`PATHWAYS_IMAGE_SOURCE=louhi`:
+
+| Benchmark | Case | Rapid `wall_clock_p50_ms` (`20261013-jax_0.11.1`) | Louhi OSS `wall_clock_p50_ms` (`20261013_0917-jax_0.11.1`) | Rapid `xprof_p50_ms` (device) | Louhi OSS `xprof_p50_ms` |
+| :--- | :--- | ---: | ---: | ---: | :--- |
+| `all_gather` | 16 MiB shard | 18.38 ms | 19.44 ms | 10.17 ms (51.1 GB/s/chip) | `None` (no `/device:TPU:*` planes in OSS build) |
+| `all_gather` | 32 MiB shard | 30.55 ms | 30.12 ms | 20.33 ms (51.2 GB/s/chip) | `None` |
+| `all_gather` | 64 MiB shard | 54.02 ms | 54.42 ms | 40.65 ms (51.2 GB/s/chip) | `None` |
+| `gemm` bf16, k=n=4096 | m=8192 | 7.85 ms | 8.52 ms | 1.41 ms (195.0 TFLOPS/chip) | `None` |
+| `gemm` bf16, k=n=4096 | m=16384 | 9.77 ms | 10.68 ms | 2.82 ms (195.0 TFLOPS/chip) | `None` |
+| `gemm` bf16, k=n=4096 | m=32768 | 12.89 ms | 12.63 ms | 5.64 ms (194.9 TFLOPS/chip) | `None` |

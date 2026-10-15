@@ -131,6 +131,9 @@ class GenerateWorkloadTest(unittest.TestCase):
   def test_op_flags_go_to_proxy(self):
     jobs = self._jobs(self._generate())
     head = _containers(jobs["pathways-head"]["template"]["spec"]["template"]["spec"])
+    worker = _containers(
+        jobs["pathways-worker"]["template"]["spec"]["template"]["spec"]
+    )["pathways-worker"]
     expected, _ = generate_workload.resolve_op_flags(
         "all_gather", generate_workload.DEFAULT_OP_FLAGS_PATH
     )
@@ -138,6 +141,50 @@ class GenerateWorkloadTest(unittest.TestCase):
     proxy_args = head["pathways-proxy"]["args"]
     self.assertEqual(proxy_args[-len(expected):], expected)
     self.assertIn("--xla_tpu_enable_all_gather_offload_tracing=true", proxy_args)
+    # Rapid parses proxy.args; Louhi OSS parses LIBTPU_INIT_ARGS inside
+    # dynamically loaded /lib/libtpu.so and needs --undefok on proxy.args.
+    undefok = proxy_args[-len(expected) - 1]
+    self.assertTrue(undefok.startswith("--undefok="))
+    self.assertIn("xla_tpu_enable_all_gather_offload_tracing", undefok)
+    expected_init_args = " ".join(expected)
+    self.assertEqual(
+        _env(head["pathways-proxy"])["LIBTPU_INIT_ARGS"], expected_init_args
+    )
+    self.assertEqual(
+        _env(head["pathways-rm"])["LIBTPU_INIT_ARGS"], expected_init_args
+    )
+    self.assertEqual(_env(worker)["LIBTPU_INIT_ARGS"], expected_init_args)
+    for c in (head["pathways-rm"], head["pathways-proxy"], worker):
+      self.assertEqual(_env(c)["TEST_UNDECLARED_OUTPUTS_DIR"], "/tmp")
+
+  def test_louhi_oss_images(self):
+    jobs = self._jobs(
+        self._generate([
+            "--pathways_version=20261013_0917-jax_0.11.1",
+            "--pathways_server_image=us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/server",
+            "--pathways_proxy_image=us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/proxy_server",
+        ])
+    )
+    head = _containers(jobs["pathways-head"]["template"]["spec"]["template"]["spec"])
+    worker = _containers(
+        jobs["pathways-worker"]["template"]["spec"]["template"]["spec"]
+    )["pathways-worker"]
+    self.assertEqual(
+        head["pathways-proxy"]["image"],
+        "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/proxy_server:20261013_0917-jax_0.11.1",
+    )
+    self.assertEqual(
+        head["pathways-rm"]["image"],
+        "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/server:20261013_0917-jax_0.11.1",
+    )
+    self.assertEqual(
+        worker["image"],
+        "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/server:20261013_0917-jax_0.11.1",
+    )
+    self.assertEqual(
+        _env(head["user-workload"])["TPUMS_PATHWAYS_VERSION"],
+        "20261013_0917-jax_0.11.1",
+    )
 
   def test_op_flags_none_and_extra_proxy_args(self):
     jobs = self._jobs(
@@ -186,7 +233,7 @@ class GenerateWorkloadTest(unittest.TestCase):
   def test_invalid_arguments(self):
     for bad in (
         ["--name=Bad_Name"],
-        ["--name=" + "a" * 41],
+        ["--name=" + "a" * 23],
         ["--gcs_output_dir=/tmp/results"],
         ["--xprof_dir=/tmp/xprof"],
     ):

@@ -30,12 +30,21 @@ On top of the generator defaults this script:
 * Runs `cloud_launch/pathways/run_benchmark.sh` from the TPUMS image as the
   user workload, which runs `tpums benchmark run-config <config>` and uploads
   the results to GCS.
-* Moves the benchmark's `op_flags.yaml` entries to where Pathways needs them:
-  `flags` are TPU compilation flags, and Pathways compiles in the
-  pathways-proxy container, so they are appended to the proxy args; `env`
-  entries configure the TPU runtime, so they are set on the pathways-worker
-  containers. (On McJAX both go into the benchmark process through
-  LIBTPU_INIT_ARGS / env, which a Pathways client ignores.)
+* Moves the benchmark's `op_flags.yaml` entries to where both the Rapid
+  release (`cloud-tpu-v2-images/pathways`, statically linked `libtpu`) and the
+  Louhi OSS release (`cloud-tpu-multipod-dev/pathways-prod`, dynamically loaded
+  `/lib/libtpu.so`) need them:
+  - `flags` are TPU compilation flags. On Rapid images they are parsed from
+    `pathways-proxy` CLI `args`; on Louhi OSS images `/opt/pathways/proxy_server`
+    loads `/lib/libtpu.so` via `dlopen`, so `--xla_tpu_*` flags live in
+    `libtpu.so` (which reads `LIBTPU_INIT_ARGS`) rather than in the proxy
+    binary's own `absl` flag table. The generator therefore sets
+    `LIBTPU_INIT_ARGS` on the Pathways containers AND passes the flags with a
+    matching `--undefok=...` on `pathways-proxy` CLI `args`, so the same
+    JobSet works with both Rapid and Louhi OSS images.
+  - `env` entries configure the TPU runtime, so they are set on the
+    `pathways-worker` containers. (On McJAX both go into the benchmark process
+    through `LIBTPU_INIT_ARGS` / `env`, which a Pathways client ignores.)
 * Adds the Kueue queue label, a pod priority class, a head node pool, and an
   activeDeadlineSeconds on the head Job so that a hung run cannot hold the
   TPU slice forever.
@@ -76,13 +85,27 @@ IMAGE_REPO_ROOT = "/opt/tpums"
 RUN_SCRIPT = f"{IMAGE_REPO_ROOT}/cloud_launch/pathways/run_benchmark.sh"
 
 USER_WORKLOAD_CONTAINER = "user-workload"
+RM_CONTAINER = "pathways-rm"
 PROXY_CONTAINER = "pathways-proxy"
 WORKER_CONTAINER = "pathways-worker"
 KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+LIBTPU_INIT_ARGS_ENV = "LIBTPU_INIT_ARGS"
+# In the Louhi OSS build (`TSL_IS_IN_OSS == 1`), `GrpcServerCredentials()` and
+# `GrpcClientCredentials()` delegate to `xla::ifrt::proxy::Get*Credentials()`,
+# which defaults to ALTS (`AltsCredentials`) unless `TEST_UNDECLARED_OUTPUTS_DIR`
+# is set in the environment. On standard GKE pod networks (without
+# `hostNetwork: true`, which `PathwaysJobSet` does not set), the GCE ALTS
+# handshaker is unreachable and ALTS handshakes between RM, proxy, and workers
+# fail. Setting `TEST_UNDECLARED_OUTPUTS_DIR=/tmp` selects
+# `InsecureChannelCredentials()` / `InsecureServerCredentials()` in the Louhi
+# OSS build (matching the Rapid build's
+# `PATHWAYS_UNSAFE_UNSAFE_OVERRIDE_GRPC_CREDENTIALS=grpc_insecure_override`)
+# and is a no-op in the Rapid build.
+OSS_INSECURE_GRPC_ENV = ("TEST_UNDECLARED_OUTPUTS_DIR", "/tmp")
 
-# JobSet pod hostnames look like "<jobset>-pathways-worker-<job>-<pod>" and must
-# fit in a 63-character DNS label.
-MAX_JOBSET_NAME_LENGTH = 40
+# JobSet sets the coordinator label to "<name>-pathways-head-0-0.<name>", which
+# must fit in a 63-byte Kubernetes label value (2 * len(name) + 19 <= 63).
+MAX_JOBSET_NAME_LENGTH = 22
 
 OP_FLAGS_AUTO = "auto"
 OP_FLAGS_NONE = "none"
@@ -307,6 +330,40 @@ def _find_container(
   raise ValueError(f"Container '{name}' not found in pod spec.")
 
 
+def _undefok_arg(flags: Sequence[str]) -> str | None:
+  """Returns an `--undefok=...` flag covering `flags`, or None if empty.
+
+  In the Louhi OSS `proxy_server` image, `libtpu.so` is loaded via `dlopen` and
+  reads `LIBTPU_INIT_ARGS`, so `--xla_tpu_*` / `--xla_jf_*` / `--xla_sc_*`
+  flags are not registered in the `proxy_server` binary's own `absl` flag table
+  when `absl::ParseCommandLine` runs. Passing `--undefok` allows `proxy.args`
+  to carry those flags for Rapid (statically-linked) images without crashing
+  the Louhi OSS `proxy_server` on startup.
+  """
+  names: list[str] = []
+  for flag in flags:
+    name = flag.lstrip("-").split("=", 1)[0]
+    if name and name not in names:
+      names.append(name)
+  return f"--undefok={','.join(names)}" if names else None
+
+
+def _upsert_env(
+    container: client.V1Container, env_vars: dict[str, str]
+) -> None:
+  """Sets or updates `env_vars` on `container` in order."""
+  existing = list(container.env or [])
+  index_by_name = {e.name: i for i, e in enumerate(existing)}
+  for name, value in env_vars.items():
+    env_var = client.V1EnvVar(name=name, value=value)
+    if name in index_by_name:
+      existing[index_by_name[name]] = env_var
+    else:
+      index_by_name[name] = len(existing)
+      existing.append(env_var)
+  container.env = existing
+
+
 @dataclasses.dataclass(frozen=True)
 class Workload:
   """A generated JobSet plus the op flags that were moved into it."""
@@ -387,19 +444,48 @@ def build_workload(args: argparse.Namespace) -> Workload:
   head_pod_spec = js.head_job_template.spec.template.spec
   worker_pod_spec = js.worker_job_template.spec.template.spec
 
-  # op_flags.yaml `flags` are TPU compilation flags. Pathways compiles in the
-  # proxy, so pass them (and any extra flags) as pathways-proxy arguments.
+  # op_flags.yaml `flags` are TPU compilation flags:
+  # * Rapid release images link `libtpu` statically into `proxy_server` and
+  #   parse compilation flags from `pathways-proxy` CLI `args` (ignoring
+  #   `LIBTPU_INIT_ARGS`).
+  # * Louhi OSS release images load `/lib/libtpu.so` dynamically via `dlopen`
+  #   and parse compilation flags from `LIBTPU_INIT_ARGS` inside `libtpu.so`
+  #   during `PJRT_Plugin_Initialize`; their `proxy_server` binary rejects
+  #   `--xla_tpu_*` CLI flags unless listed in `--undefok`.
+  # Setting both `proxy.args` (with `--undefok`) and `LIBTPU_INIT_ARGS` makes
+  # the generated JobSet work on both Rapid and Louhi OSS images.
+  rm = _find_container(head_pod_spec, RM_CONTAINER)
   proxy = _find_container(head_pod_spec, PROXY_CONTAINER)
+  worker = _find_container(worker_pod_spec, WORKER_CONTAINER)
   extra_proxy_args = shlex.split(args.extra_proxy_args)
-  proxy.args = list(proxy.args or []) + op_flags + extra_proxy_args
+  proxy_flags = op_flags + extra_proxy_args
+  undefok = _undefok_arg(proxy_flags)
+  proxy.args = (
+      list(proxy.args or []) + ([undefok] if undefok else []) + proxy_flags
+  )
 
-  # op_flags.yaml `env` entries configure the TPU runtime, which runs in the
-  # Pathways workers.
-  if op_env:
-    worker = _find_container(worker_pod_spec, WORKER_CONTAINER)
-    worker.env = list(worker.env or []) + [
-        client.V1EnvVar(name=k, value=v) for k, v in op_env.items()
-    ]
+  worker_env = dict(op_env)
+  if proxy_flags:
+    libtpu_init_args = " ".join(proxy_flags)
+    if worker_env.get(LIBTPU_INIT_ARGS_ENV):
+      worker_env[LIBTPU_INIT_ARGS_ENV] = (
+          f"{worker_env[LIBTPU_INIT_ARGS_ENV]} {libtpu_init_args}"
+      )
+    else:
+      worker_env[LIBTPU_INIT_ARGS_ENV] = libtpu_init_args
+    _upsert_env(proxy, {LIBTPU_INIT_ARGS_ENV: libtpu_init_args})
+    _upsert_env(rm, {LIBTPU_INIT_ARGS_ENV: libtpu_init_args})
+
+  oss_grpc_env = {OSS_INSECURE_GRPC_ENV[0]: OSS_INSECURE_GRPC_ENV[1]}
+  _upsert_env(rm, oss_grpc_env)
+  _upsert_env(proxy, oss_grpc_env)
+  worker_env.setdefault(OSS_INSECURE_GRPC_ENV[0], OSS_INSECURE_GRPC_ENV[1])
+
+  # op_flags.yaml `env` entries (plus `LIBTPU_INIT_ARGS` and
+  # `TEST_UNDECLARED_OUTPUTS_DIR` for Louhi OSS) configure the TPU runtime in
+  # the Pathways workers.
+  if worker_env:
+    _upsert_env(worker, worker_env)
 
   if args.active_deadline_seconds > 0:
     js.head_job_template.spec.active_deadline_seconds = (
@@ -408,8 +494,8 @@ def build_workload(args: argparse.Namespace) -> Workload:
   return Workload(
       jobset=js,
       benchmark_name=benchmark_name,
-      proxy_flags=op_flags + extra_proxy_args,
-      worker_env=op_env,
+      proxy_flags=proxy_flags,
+      worker_env=worker_env,
   )
 
 

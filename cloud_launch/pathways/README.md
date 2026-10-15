@@ -53,14 +53,26 @@ flowchart LR
    containers, sets `JAX_PLATFORMS=proxy`,
    `JAX_BACKEND_TARGET=grpc://localhost:29000`, and makes the JobSet succeed
    when TPUMS exits 0.
-2. **Op flags → proxy.** The benchmark's `op_flags.yaml` `flags` are TPU
-   *compilation* flags. On McJAX TPUMS exports them as `LIBTPU_INIT_ARGS` in
-   every process; a Pathways client has no libtpu, and compilation happens in
-   the `pathways-proxy` container, so they are appended to the proxy args.
-   `env` entries (TPU runtime settings, e.g. `TPU_PREMAPPED_BUFFER_SIZE` for the
-   host↔device benchmarks) go to the `pathways-worker` containers.
-   `--op_flags=none` (or `OP_FLAGS=none`) disables this if a flag is not
-   accepted by the proxy build.
+2. **Op flags → Rapid & Louhi OSS Pathways containers.** The benchmark's
+   `op_flags.yaml` `flags` are TPU *compilation* flags. On McJAX TPUMS exports
+   them as `LIBTPU_INIT_ARGS` in every process; a Pathways client has no
+   `libtpu`, and compilation happens in the `pathways-proxy` container:
+   - **Rapid release images** (`us-docker.pkg.dev/cloud-tpu-v2-images/pathways/{server,proxy_server}`)
+     statically link `libtpu` into the proxy binary and parse `--xla_tpu_*`
+     flags from `pathways-proxy` CLI `args` (ignoring `LIBTPU_INIT_ARGS`).
+   - **Louhi OSS release images** (`us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/{server,proxy_server}`)
+     dynamically load `/lib/libtpu.so` via `dlopen` (`TPU_LIBRARY_PATH=/lib/libtpu.so`).
+     Their `--xla_tpu_*` flags live inside `libtpu.so` (which parses
+     `LIBTPU_INIT_ARGS` during `PJRT_Plugin_Initialize`) rather than in the
+     `proxy_server` binary's own `absl` flag table.
+   - `generate_workload.py` sets `LIBTPU_INIT_ARGS` on `pathways-proxy`,
+     `pathways-rm` and `pathways-worker` **and** appends the flags with a
+     matching `--undefok=...` to `pathways-proxy` CLI `args`, so the same
+     generated JobSet works on both Rapid and Louhi OSS images.
+   - `env` entries (TPU runtime settings, e.g. `TPU_PREMAPPED_BUFFER_SIZE` for
+     the host↔device benchmarks) go to the `pathways-worker` containers.
+   - `--op_flags=none` (or `OP_FLAGS=none`) disables this if a flag is not
+     accepted by the TPU compiler build.
 3. **Scheduling:** Kueue queue label, `priorityClassName` on head and worker
    pods, head node-pool selector, and `activeDeadlineSeconds` on the head Job
    (default 1800 s, like the Pathways CI workloads). The `user-workload`
@@ -94,9 +106,26 @@ export GCS_BUCKET=cloud-pathways-staging GS_PREFIX=tpums-pathways
 cloud_launch/pathways/build_image.sh
 export TPUMS_IMAGE=us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-test/tpums-pathways:<tag>
 
-# 3. Run a config. Results: gs://$GCS_BUCKET/$GS_PREFIX/<run name>/
+# 3. Run a config (default: Rapid release images, PATHWAYS_IMAGE_SOURCE=rapid).
+#    Results: gs://$GCS_BUCKET/$GS_PREFIX/<run name>/
 cloud_launch/pathways/pathways_launch.sh configs/v5e/4x8/all_gather.yaml
+
+# 4. Or run against the OSS Pathways images built and released via Louhi
+#    (us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/{server,proxy_server}):
+PATHWAYS_IMAGE_SOURCE=louhi \
+  cloud_launch/pathways/pathways_launch.sh configs/v5e/4x8/all_gather.yaml tpums-pw-louhi-ag
 ```
+
+### Selecting Rapid vs Louhi OSS Pathways images
+
+`common.sh` supports switching between the two release pipelines via
+`PATHWAYS_IMAGE_SOURCE` (or by overriding `PATHWAYS_SERVER_IMAGE`,
+`PATHWAYS_PROXY_IMAGE`, and `PATHWAYS_VERSION` directly):
+
+| `PATHWAYS_IMAGE_SOURCE` | Server & proxy repositories | Default `PATHWAYS_VERSION` (for JAX 0.11.1) | Key runtime differences (handled automatically by `generate_workload.py`) |
+| :--- | :--- | :--- | :--- |
+| `rapid` (default) | `us-docker.pkg.dev/cloud-tpu-v2-images/pathways/{server,proxy_server}` | `20261013-jax_0.11.1` | Statically linked `libtpu` (`proxy.args`), `PATHWAYS_UNSAFE_UNSAFE_OVERRIDE_GRPC_CREDENTIALS=grpc_insecure_override`, includes `/device:TPU:*` XProf planes (`wall_clock_*` + `xprof_*`). |
+| `louhi` (or `oss`) | `us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-prod/{server,proxy_server}` | `20261013_0917-jax_0.11.1` | Dynamically loaded `/lib/libtpu.so` (`LIBTPU_INIT_ARGS` + `--undefok`), `TEST_UNDECLARED_OUTPUTS_DIR=/tmp` for intra-JobSet gRPC credentials, `/host:CPU` XProf planes (`wall_clock_*` reported, `xprof_*` set to `None`). |
 
 To only generate the YAML (e.g. to review or `kubectl apply` it yourself):
 

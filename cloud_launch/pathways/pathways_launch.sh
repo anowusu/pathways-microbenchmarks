@@ -58,7 +58,8 @@ for var in PROJECT_ID CLUSTER_NAME CLUSTER_LOCATION GCS_BUCKET TPUMS_IMAGE; do
 done
 CONFIG_NAME="$(basename "${CONFIG}" .yaml | tr '_.' '--' | tr '[:upper:]' '[:lower:]')"
 RUN_NAME="${2:-tpums-pw-${CONFIG_NAME}}"
-RUN_NAME="$(echo "${RUN_NAME:0:40}" | sed 's/-*$//')"
+# JobSet sets the coordinator label "<name>-pathways-head-0-0.<name>" (<= 63 B).
+RUN_NAME="$(echo "${RUN_NAME:0:22}" | sed 's/-*$//')"
 OP_FLAGS="${OP_FLAGS:-auto}"
 WAIT="${WAIT:-true}"
 CLEANUP="${CLEANUP:-false}"

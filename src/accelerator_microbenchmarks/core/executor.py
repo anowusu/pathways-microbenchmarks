@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from accelerator_microbenchmarks.core import config as config_module
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import profiler
 from accelerator_microbenchmarks.core import throttle_profiler
 import jax
@@ -53,6 +54,16 @@ class ExecutionResult:
   raw_times_ms: list[float]
   actual_runs: int
   xprof_expected_runs: Optional[int] = None
+
+
+def _trace_device_id(device: jax.Device) -> Optional[int]:
+  """Returns the `<id>` of the `/device:TPU:<id>` trace plane of `device`.
+
+  Pathways proxy devices have no local_hardware_id. Pathways profiles the
+  worker that hosts JAX device 0, whose planes are named by that host's chip
+  ordinal, so device 0 is `/device:TPU:0` (see `pathways.load_trace`).
+  """
+  return device.id if pathways.is_active() else device.local_hardware_id
 
 
 class BaseRunExecutor:
@@ -107,6 +118,8 @@ class BaseRunExecutor:
     loop_start = time.perf_counter()
 
     with ctx:
+      if is_traced and pathways.is_active():
+        time.sleep(1)  # Pathways enables the device tracers asynchronously.
       while actual_runs < self.config.num_runs or (
           time.perf_counter() - loop_start < self.config.min_duration_s
       ):
@@ -136,7 +149,7 @@ class BaseRunExecutor:
     best_dev_id: Optional[int] = None
     best_median = -1.0
     for dev in jax.local_devices():
-      dev_id = dev.local_hardware_id
+      dev_id = _trace_device_id(dev)
       durs = profiler.parse_xprof_durations(
           trace_dir,
           self.benchmark.match_xprof_op_fallback,
@@ -175,7 +188,7 @@ class BaseRunExecutor:
     ):
       device_slices: list[list[float]] = []
       for dev in jax.local_devices():
-        dev_slice = _durations_for_device(dev.local_hardware_id)
+        dev_slice = _durations_for_device(_trace_device_id(dev))
         if dev_slice:
           device_slices.append(dev_slice)
       return (
@@ -185,7 +198,7 @@ class BaseRunExecutor:
       )
 
     measured_device = self.benchmark.get_device_to_measure()
-    return _durations_for_device(measured_device.local_hardware_id)
+    return _durations_for_device(_trace_device_id(measured_device))
 
   def get_xprof_durations(self, xprof_dir: str) -> list[float]:
     """Returns XProf kernel durations (ms) for the completed benchmark run."""

@@ -8,6 +8,7 @@ spec data types so callers never import the `specs` package directly.
 
 from accelerator_microbenchmarks.specs import schema
 from accelerator_microbenchmarks.specs import tpu7x
+from accelerator_microbenchmarks.specs import v5e
 from accelerator_microbenchmarks.specs import v6e
 
 
@@ -23,6 +24,7 @@ DEFAULT_FALLBACK_DTYPE: str = schema.DEFAULT_FALLBACK_DTYPE
 
 TPU7X_HARDWARE_SPEC: HardwareSpec = tpu7x.TPU7X_HARDWARE_SPEC
 V6E_HARDWARE_SPEC: HardwareSpec = v6e.V6E_HARDWARE_SPEC
+V5E_HARDWARE_SPEC: HardwareSpec = v5e.V5E_HARDWARE_SPEC
 
 # Every generation available in this checkout, keyed by canonical
 # `TpuVersion`. Adding a generation means adding its spec module and one entry
@@ -31,6 +33,7 @@ V6E_HARDWARE_SPEC: HardwareSpec = v6e.V6E_HARDWARE_SPEC
 HARDWARE_SPECS: dict[TpuVersion, HardwareSpec] = {
     TpuVersion.TPU7X: TPU7X_HARDWARE_SPEC,
     TpuVersion.V6E: V6E_HARDWARE_SPEC,
+    TpuVersion.V5E: V5E_HARDWARE_SPEC,
 }
 
 

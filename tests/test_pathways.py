@@ -1,5 +1,6 @@
 """Unit tests for pathways.py."""
 
+import fnmatch
 import json
 import os
 import sys
@@ -10,7 +11,7 @@ from absl.testing import absltest
 from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import profiler
 
-_WORKER_TRACE = "gs://b/x/plugins/profile/s/server-j-pathways-worker-0-2.xplane.pb"
+_WORKER_TRACE = "gs://b/x/plugins/profile/s/server-j-worker-0-2.0.0.xplane.pb"
 
 
 def _fake_tensorflow(xplane_paths, trace):
@@ -65,6 +66,21 @@ class PathwaysTest(absltest.TestCase):
   def test_load_trace_without_worker_trace(self):
     with mock.patch.dict(sys.modules, _fake_tensorflow([], {})):
       self.assertIsNone(pathways.load_trace("gs://b/x", wait_s=0))
+
+  def test_worker_trace_glob_selects_worker_traces_only(self):
+    profile = "plugins/profile/2026_10_24_18_14_31/"
+    for worker_trace in (
+        "server-j-pathways-worker-0-1.0.0.xplane.pb",  # pathwaysutils JobSet
+        "server-gke-tpu-030c92e6-bk7p.0.0.xplane.pb",  # gcluster JobSet
+    ):
+      self.assertTrue(fnmatch.fnmatch(profile + worker_trace, pathways._WORKER_TRACE_GLOB))  # pylint: disable=protected-access
+    for other_trace in (
+        "server-j-pathways-head-0-0.xplane.pb",
+        "client.j-pathways-head-0-0.xplane.pb",
+        "j-pathways-head-0-0.xplane.pb",
+        "server-gke-tpu-030c92e6-bk7p.0.0.SSTABLE",
+    ):
+      self.assertFalse(fnmatch.fnmatch(profile + other_trace, pathways._WORKER_TRACE_GLOB))  # pylint: disable=protected-access
 
   def test_profiler_reads_gcs_traces_through_pathways(self):
     with mock.patch.object(pathways, "load_trace") as load_trace:

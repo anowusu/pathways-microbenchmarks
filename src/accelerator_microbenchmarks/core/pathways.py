@@ -12,7 +12,10 @@ import os
 import time
 from typing import Any
 
-_WORKER_TRACE_GLOB = "plugins/profile/*/server-*-worker-*.xplane.pb"
+# A worker's trace is `server-<host>.<n>.<m>.xplane.pb`; the head's own server
+# trace, `server-<host>.xplane.pb`, has no numeric suffix. The host is the pod
+# name with pathwaysutils JobSets and the node name with gcluster's.
+_WORKER_TRACE_GLOB = "plugins/profile/*/server-*.[0-9]*.[0-9]*.xplane.pb"
 
 
 def is_active() -> bool:

@@ -30,6 +30,12 @@ class SystemTest(absltest.TestCase):
           system.TpuVersion.V6E,
       )
 
+    for device_kind in ("v5e", "V5E", "TPU v5e", "TPU v5 lite"):
+      self.assertEqual(
+          system.TpuVersion.from_device_kind(device_kind),
+          system.TpuVersion.V5E,
+      )
+
   def test_tpu_version_from_device_kind_is_idempotent_on_enum(self):
     """Verify that an already resolved TpuVersion is returned unchanged."""
     self.assertIs(
@@ -228,6 +234,15 @@ class SystemTest(absltest.TestCase):
     # Test HBM stats
     self.assertEqual(hw_spec.hbm.peak_bw_gb_s, 1638.4)
     self.assertEqual(hw_spec.peak_hbm_bandwidth_per_device, 1638.4)
+
+  def test_hardware_spec_v5e_presets(self):
+    """Verify that the V5E_HARDWARE_SPEC preset has correct values."""
+    hw_spec = system.V5E_HARDWARE_SPEC
+    self.assertEqual(hw_spec.name, system.TpuVersion.V5E)
+    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["bfloat16"], 197.0)
+    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["int8"], 394.0)
+    self.assertEqual(hw_spec.ici.link_bw_per_direction_gb_s, 50.0)
+    self.assertEqual(hw_spec.peak_hbm_bandwidth_per_device, 819.2)
 
   def test_hardware_spec_hbm_none(self):
     """Verify peak_hbm_bandwidth_per_device returns 0.0 when HBM is None or devices_per_chip <= 0."""

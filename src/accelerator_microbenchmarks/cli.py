@@ -14,6 +14,7 @@ from accelerator_microbenchmarks.benchmarks import benchmark_loader
 from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import config
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import platform as core_platform
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import runner
@@ -263,6 +264,7 @@ def run(argv: Sequence[str]) -> None:
     create_parser().print_help()
     return
 
+  pathways.initialize()  # Must precede the first JAX backend access.
   parser = create_parser()
   args, _ = parser.parse_known_args(argv)
 

@@ -20,6 +20,10 @@ dependencies = [
     "tpu-sync-jax==0.0.1.dev20261022073132",
 ]
 
+[project.optional-dependencies]
+# Pathways on Cloud client (JAX_PLATFORMS=proxy); see templates/pathways_jobset.py
+pathways = ["pathwaysutils"]
+
 [project.scripts]
 tpums = "accelerator_microbenchmarks.cli:main"
 

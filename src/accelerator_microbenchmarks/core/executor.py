@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from accelerator_microbenchmarks.core import config as config_module
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import profiler
 from accelerator_microbenchmarks.core import throttle_profiler
 import jax
@@ -62,6 +63,16 @@ class _XprofParseStatus(enum.IntEnum):
   OK = 0
   PARSE_FAILED = 1
   UNEQUAL_LOCAL_COUNTS = 2
+
+
+def _trace_device_id(device: jax.Device) -> Optional[int]:
+  """Returns the `<id>` of the `/device:TPU:<id>` trace plane of `device`.
+
+  Pathways proxy devices have no local_hardware_id. Pathways profiles the
+  worker that hosts JAX device 0, whose planes are named by that host's chip
+  ordinal, so device 0 is `/device:TPU:0` (see `pathways.load_trace`).
+  """
+  return device.id if pathways.is_active() else device.local_hardware_id
 
 
 class BaseRunExecutor:
@@ -116,6 +127,8 @@ class BaseRunExecutor:
     loop_start = time.perf_counter()
 
     with ctx:
+      if is_traced and pathways.is_active():
+        time.sleep(1)  # Pathways enables the device tracers asynchronously.
       while actual_runs < self.config.num_runs or (
           time.perf_counter() - loop_start < self.config.min_duration_s
       ):
@@ -164,7 +177,7 @@ class BaseRunExecutor:
     best_dev_id: Optional[int] = None
     best_median = -1.0
     for dev in jax.local_devices():
-      dev_id = dev.local_hardware_id
+      dev_id = _trace_device_id(dev)
       durations = self._durations_for_device(trace_dir, dev_id)
       if durations:
         med = float(np.median(durations))
@@ -192,7 +205,7 @@ class BaseRunExecutor:
 
     try:
       device_slices = [
-          self._durations_for_device(trace_dir, dev.local_hardware_id)
+          self._durations_for_device(trace_dir, _trace_device_id(dev))
           for dev in jax.local_devices()
       ]
     except Exception:  # pylint: disable=broad-exception-caught
@@ -287,7 +300,7 @@ class BaseRunExecutor:
       if trace_dir:
         try:
           local_durations = self._durations_for_device(
-              trace_dir, measured_device.local_hardware_id
+              trace_dir, _trace_device_id(measured_device)
           )
         except Exception as e:  # pylint: disable=broad-exception-caught
           print(f"Error parsing local XProf trace: {e}")
@@ -348,7 +361,7 @@ class BaseRunExecutor:
     ):
       device_slices: list[list[float]] = []
       for dev in jax.local_devices():
-        dev_slice = self._durations_for_device(trace_dir, dev.local_hardware_id)
+        dev_slice = self._durations_for_device(trace_dir, _trace_device_id(dev))
         if dev_slice:
           device_slices.append(dev_slice)
       return (
@@ -359,7 +372,7 @@ class BaseRunExecutor:
 
     measured_device = self.benchmark.get_device_to_measure()
     return self._durations_for_device(
-        trace_dir, measured_device.local_hardware_id
+        trace_dir, _trace_device_id(measured_device)
     )
 
   def get_xprof_durations(self, xprof_dir: str) -> list[float]:

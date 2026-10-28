@@ -6,6 +6,7 @@ import os
 from typing import Any, Callable, Optional
 
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import pathways
 
 import os
 MARKER = constants.MARKER
@@ -37,6 +38,8 @@ def _get_target_pid(
 
 def _load_xprof_trace(xprof_dir: str) -> dict[str, Any] | None:
   """Locates, decompresses, and parses the .json.gz XProf trace file."""
+  if xprof_dir.startswith("gs://"):  # Pathways on Cloud: traced by the workers.
+    return pathways.load_trace(xprof_dir)
   trace_path = None
   for root, _, files in os.walk(xprof_dir):
     for file in files:

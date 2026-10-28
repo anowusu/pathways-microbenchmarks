@@ -1,0 +1,13 @@
+benchmark:
+  name: hbm
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 5
+    dtype: bfloat16
+    op_type: copy
+  sweep:
+    num_elements:
+      start: 67108864
+      end: 536870912
+      multiplier: 2

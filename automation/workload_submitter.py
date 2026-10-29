@@ -564,6 +564,13 @@ def generate_jobset_manifest(
   for k, v in replacements.items():
     manifest = manifest.replace(k, v)
 
+  # Kueue only accepts the priority-class label if a WorkloadPriorityClass of
+  # that name exists; clusters without them (pod PriorityClasses only) take an
+  # empty --priority, which drops the label.
+  if not priority_class:
+    manifest = re.sub(
+        r"\n\s*kueue\.x-k8s\.io/priority-class:[^\n]*", "", manifest
+    )
   # Handle multi-node placement policy substitution
   if placement_policy:
     manifest = re.sub(

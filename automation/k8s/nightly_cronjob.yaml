@@ -82,7 +82,9 @@ spec:
                 - --zone=us-south1-a
                 - --namespace=default
                 - --queue=multislice-queue
-                - --priority=medium
+                # Empty: this cluster defines pod PriorityClasses only, no Kueue
+                # WorkloadPriorityClasses, so the Kueue priority label is omitted.
+                - --priority=
                 - --suite-file=automation/canonical_suite_v5e.yaml
                 - --runtimes=mcjax,louhi,rapid
                 - --max-parallel=3

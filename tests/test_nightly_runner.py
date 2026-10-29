@@ -47,6 +47,9 @@ class NightlyRunnerTest(parameterized.TestCase):
     self.mock_gen_report = self.enter_context(
         mock.patch.object(report_generator, "generate_and_publish_report")
     )
+    self.mock_dashboard = self.enter_context(
+        mock.patch.object(nightly_runner, "publish_dashboard", return_value=[])
+    )
 
   @parameterized.named_parameters(
       ("tpu7x_suite", "automation/canonical_suite_v7x.yaml", "tpu7x"),
@@ -238,6 +241,9 @@ class NightlyRunnerTest(parameterized.TestCase):
     # The execution summary still describes this run only.
     self.assertLen(self.mock_gen_report.call_args.kwargs["results"], 1)
     mock_write.assert_called_once()
+    # The dashboard is built from the day's rows and this run's JobSets.
+    self.mock_dashboard.assert_called_once()
+    self.assertLen(self.mock_dashboard.call_args.args[3], 1)
 
   @mock.patch.object(nightly_runner, "run_pipeline")
   def test_main_forwards_accelerator_and_selection_flags(self, mock_run):

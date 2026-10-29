@@ -44,8 +44,11 @@ def verify_gcs_bucket_accessible(gcs_bucket: str) -> None:
     RuntimeError: If the bucket cannot be listed.
   """
   bucket_uri = utils.format_gcs_uri(gcs_bucket)
+  # Probe the bucket itself: a prefix that has no objects yet (first night
+  # under a new prefix) makes `ls` fail with "matched no objects".
+  bucket_only = "gs://" + bucket_uri.removeprefix("gs://").split("/", 1)[0]
   proc = subprocess.run(
-      ["gcloud", "storage", "ls", bucket_uri],
+      ["gcloud", "storage", "ls", bucket_only],
       capture_output=True,
       text=True,
       check=False,

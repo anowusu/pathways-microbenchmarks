@@ -1,0 +1,19 @@
+# Cloud Build config for the nightly driver image.
+#   gcloud builds submit --project cloud-tpu-multipod-dev \
+#     --config automation/k8s/cloudbuild.yaml .
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - automation/k8s/Dockerfile
+      - -t
+      - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:latest
+      - -t
+      - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:$SHORT_SHA
+      - .
+images:
+  - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:latest
+  - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:$SHORT_SHA
+options:
+  logging: CLOUD_LOGGING_ONLY

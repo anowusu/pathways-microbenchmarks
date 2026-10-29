@@ -27,10 +27,21 @@ gs://cloud-pathways-staging/tpums-nightly/
 │   │                                  git_commit.txt, provenance.json, xprof/ (McJAX only),
 │   │                                  pathways/ (Pathways scratch: compilation cache)
 │   ├── aggregated_results/<category>.csv   one CSV per benchmark class, all runtimes
-│   └── consolidated_report.{md,html}
+│   ├── consolidated_report.{md,html}
+│   └── dashboard.html                 interactive charts (self-contained, see below)
 ├── reports/<YYYY-MM-DD>.{md,html}     copies of the consolidated report
-└── reports/latest.{md,html}           always the most recent run
+├── reports/<YYYY-MM-DD>_dashboard.html
+├── reports/latest.{md,html}           always the most recent run
+└── reports/latest_dashboard.html
 ```
+
+`dashboard.html` (`automation/dashboard.py`) is a self-contained page — the
+charts are drawn by a little inline JavaScript, no external assets — with the
+run's JobSets and outcomes, grouped bars of the p50 step time per case and
+runtime (solid: XProf device time, hollow: wall clock), a Pathways / McJAX
+ratio heat map, and achieved throughput per case. Open it from the Cloud
+Console object page (Authenticated URL) or download it; hovering gives p90,
+std, throughput and the slice.
 
 `provenance.json` records the git commit of the benchmark code, the node
 pools the pods ran on (`node_pools`; GKE names TPU slice nodes

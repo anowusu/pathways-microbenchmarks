@@ -25,6 +25,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from automation import bq_writer
+from automation import dashboard
 from automation import metrics_aggregator
 from automation import runtime_comparison
 from automation import runtimes
@@ -511,6 +512,56 @@ class PodDigestTest(absltest.TestCase):
         "gs://b/d/mcjax/gemm",
         {"runtime": "mcjax", "git_commit": "abc", "client_image_digest": self._CLIENT},
     )
+
+
+class DashboardTest(absltest.TestCase):
+
+  def _results(self):
+    ok = workload_submitter.BenchmarkResult(
+        workload_name="tpums-rapid-gemm", config_name="gemm", config_rel_path="c",
+        topology="4x8", status="SUCCESS", duration_seconds=95.0, gcs_artifact_path="gs://b",
+        runtime="rapid", provenance={"node_pools": "gke-cpu-np-1,gke-tpu-abcd1234"},
+    )
+    bad = workload_submitter.BenchmarkResult(
+        workload_name="tpums-louhi-hbm", config_name="hbm", config_rel_path="c",
+        topology="4x8", status="TIMEOUT", duration_seconds=1500.0, gcs_artifact_path="gs://b",
+        runtime="louhi", error_message="attempt 1: TIMEOUT: Exceeded timeout of 25 minutes",
+    )
+    return [ok, bad]
+
+  def test_render_dashboard_embeds_rows_and_jobsets(self):
+    rows = {"collectives": [_row("mcjax", "1.0", "2.0"), _row("rapid", "1.1", "8.0", node_pools="gke-tpu-abcd1234"),
+                            _row("louhi", "", "9.0")], "gemm": [], "hbm": []}
+    html = dashboard.render_dashboard(
+        rows, self._results(), date_str="2026-10-29", cluster="pw-scale-test-v5e-32",
+        report_uri="gs://b/reports/2026-10-29.html",
+    )
+    self.assertIn("TPUMS nightly — 2026-10-29", html)
+    self.assertIn("pw-scale-test-v5e-32", html)
+    embedded = json.loads(html.split("const ROWS = ")[1].split(";\n")[0])
+    self.assertLen(embedded, 3)
+    self.assertEqual({r["runtime"] for r in embedded}, {"mcjax", "rapid", "louhi"})
+    self.assertNotIn("xprof_p50_ms", embedded[2])  # empty cells are dropped
+    jobsets = json.loads(html.split("const JOBSETS = ")[1].split(";\n")[0])
+    self.assertEqual([j["status"] for j in jobsets], ["SUCCESS", "TIMEOUT"])
+    self.assertEqual(jobsets[0]["slice"], "tpu-abcd1234")
+    self.assertIn("Exceeded timeout", jobsets[1]["error"])
+    # Self-contained: no external scripts or styles.
+    self.assertNotIn("<script src=", html)
+    self.assertNotIn("<link ", html)
+
+  @mock.patch.object(subprocess, "run")
+  def test_publish_dashboard_writes_day_and_latest(self, mock_run):
+    mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    written = dashboard.publish_dashboard("gs://b/tpums-nightly", "2026-10-29", "<html>")
+    self.assertEqual(written, [
+        "gs://b/tpums-nightly/2026-10-29/dashboard.html",
+        "gs://b/tpums-nightly/reports/2026-10-29_dashboard.html",
+        "gs://b/tpums-nightly/reports/latest_dashboard.html",
+    ])
+    for call in mock_run.call_args_list:
+      self.assertEqual(call.args[0][:4], ["gcloud", "storage", "cp", "--content-type=text/html"])
+      self.assertEqual(call.kwargs["input"], "<html>")
 
 
 class RuntimeComparisonTest(absltest.TestCase):

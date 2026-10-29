@@ -36,6 +36,7 @@ import sys
 from typing import Any, Optional
 
 from automation import bq_writer
+from automation import dashboard
 from automation import metrics_aggregator
 from automation import report_generator
 from automation import runtimes as runtimes_lib
@@ -78,6 +79,32 @@ def publish_report_copies(
             proc.returncode,
             (proc.stderr or "").strip(),
         )
+
+
+def publish_dashboard(
+    gcs_bucket: str,
+    date_str: str,
+    categorized_metrics: dict[str, list[dict[str, Any]]],
+    results: Sequence[workload_submitter.BenchmarkResult],
+    *,
+    cluster: str = "",
+) -> list[str]:
+  """Renders and uploads the interactive dashboard; failures are logged."""
+  try:
+    html = dashboard.render_dashboard(
+        categorized_metrics,
+        results,
+        date_str=date_str,
+        cluster=cluster,
+        report_uri=utils.format_gcs_uri(
+            gcs_bucket, REPORTS_SUBDIR, f"{date_str}.html"
+        ),
+    )
+    return dashboard.publish_dashboard(gcs_bucket, date_str, html)
+  except Exception:  # pylint: disable=broad-exception-caught
+    # The report and BigQuery rows are the primary outputs.
+    logging.exception("Dashboard generation failed.")
+    return []
 
 
 def write_bigquery(
@@ -366,6 +393,13 @@ def run_pipeline(
 
   if not dry_run and gcs_bucket:
     publish_report_copies(gcs_bucket, date_str, output_report)
+    publish_dashboard(
+        gcs_bucket,
+        date_str,
+        categorized_metrics,
+        results,
+        cluster=cluster,
+    )
 
   if bq_table and not dry_run:
     write_bigquery(

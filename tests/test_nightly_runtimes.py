@@ -249,13 +249,14 @@ class RetryTest(absltest.TestCase):
         config_name="all_gather",
         config_rel_path="configs/v5e/4x8/all_gather.yaml",
         topology="4x8",
-        manifest_yaml="kind: JobSet",
+        manifest_yaml="kind: JobSet\nname: tpums-rapid-all-gather",
         gcs_output_dir="gs://b/2026-10-29/rapid/all_gather",
         start_time=0.0,
         total_pods=9,
         runtime="rapid",
         fixed_name=True,
         base_name="tpums-rapid-all-gather",
+        render_manifest=lambda name: f"kind: JobSet\nname: {name}",
     )
     return workload_submitter.WorkloadManager(
         timeout_minutes=1,
@@ -266,17 +267,32 @@ class RetryTest(absltest.TestCase):
         pending_workloads={wl.workload_name: wl},
     )
 
+  def test_retry_workload_name_fits_and_differs(self):
+    self.assertEqual(
+        workload_submitter.retry_workload_name("tpums-rapid-all-gather", 2),
+        "tpums-rapid-all-gat-r2",
+    )
+    self.assertEqual(workload_submitter.retry_workload_name("tpums-louhi-hbm", 3), "tpums-louhi-hbm-r3")
+    self.assertLessEqual(
+        len(workload_submitter.retry_workload_name("tpums-rapid-all-gather", 10)),
+        workload_submitter.PATHWAYS_WORKLOAD_NAME_MAX_LEN,
+    )
+
   @mock.patch.object(workload_submitter, "upload_provenance")
   @mock.patch.object(workload_submitter, "_delete_existing_jobset")
   @mock.patch.object(workload_submitter, "delete_jobset", return_value=True)
-  @mock.patch.object(workload_submitter, "apply_jobset", return_value="tpums-rapid-all-gather")
+  @mock.patch.object(workload_submitter, "apply_jobset")
   @mock.patch.object(workload_submitter, "fetch_namespace_pods", return_value={})
   @mock.patch.object(workload_submitter, "fetch_namespace_jobsets")
   def test_failed_workload_is_resubmitted_once(
       self, mock_jobsets, mock_pods, mock_apply, mock_delete, mock_delete_existing, mock_upload
   ):
     del mock_pods, mock_upload  # Unused.
-    mock_jobsets.side_effect = [self._FAILED, self._COMPLETED, self._COMPLETED]
+    mock_apply.side_effect = lambda manifest: manifest.split("name: ")[1]
+    retry_name = "tpums-rapid-all-gat-r2"
+    completed_retry = {retry_name: {"status": {"conditions": [
+        {"type": "Completed", "status": "True"}]}}}
+    mock_jobsets.side_effect = [self._FAILED, completed_retry, completed_retry]
     manager = self._manager(retries=1)
     manager.submit_all()
     results = manager.poll()
@@ -284,22 +300,36 @@ class RetryTest(absltest.TestCase):
     self.assertLen(results, 1)
     self.assertEqual(results[0].status, "SUCCESS")
     self.assertIsNone(results[0].error_message)
-    self.assertEqual(mock_apply.call_count, 2)
-    # The failed JobSet is deleted before the retry recreates the fixed name.
+    # The retry runs under a new JobSet name with a re-rendered manifest, so
+    # its head does not share a DNS name with the terminating old head.
+    self.assertEqual(results[0].workload_name, retry_name)
+    self.assertEqual(
+        [c.args[0] for c in mock_apply.call_args_list],
+        ["kind: JobSet\nname: tpums-rapid-all-gather", f"kind: JobSet\nname: {retry_name}"],
+    )
+    # The failed JobSet is deleted before the retry is created.
     mock_delete.assert_any_call("tpums-rapid-all-gather", utils.DEFAULT_NAMESPACE)
-    self.assertEqual(mock_delete_existing.call_count, 2)
+    self.assertEqual(
+        [c.args[0] for c in mock_delete_existing.call_args_list],
+        ["tpums-rapid-all-gather", retry_name],
+    )
 
   @mock.patch.object(workload_submitter, "upload_provenance")
   @mock.patch.object(workload_submitter, "_delete_existing_jobset")
   @mock.patch.object(workload_submitter, "delete_jobset", return_value=True)
-  @mock.patch.object(workload_submitter, "apply_jobset", return_value="tpums-rapid-all-gather")
+  @mock.patch.object(workload_submitter, "apply_jobset")
   @mock.patch.object(workload_submitter, "fetch_namespace_pods", return_value={})
   @mock.patch.object(workload_submitter, "fetch_namespace_jobsets")
   def test_errors_of_every_attempt_are_reported(
       self, mock_jobsets, mock_pods, mock_apply, mock_delete, mock_delete_existing, mock_upload
   ):
     del mock_pods, mock_delete, mock_delete_existing, mock_upload  # Unused.
-    mock_jobsets.return_value = self._FAILED
+    mock_apply.side_effect = lambda manifest: manifest.split("name: ")[1]
+    failed_any = {"status": {"conditions": [
+        {"type": "Failed", "status": "True", "reason": "Preempted", "message": "rm crashed"}]}}
+    mock_jobsets.return_value = {
+        "tpums-rapid-all-gather": failed_any, "tpums-rapid-all-gat-r2": failed_any,
+    }
     manager = self._manager(retries=1)
     manager.submit_all()
     results = manager.poll()

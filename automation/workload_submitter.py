@@ -16,7 +16,7 @@
 
 import argparse
 import collections
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import dataclasses
 import datetime
 import json
@@ -206,13 +206,32 @@ class ActiveWorkload:
   # Provenance as last written to provenance.json; pod image digests learnt
   # while polling make it stale, and it is re-uploaded on completion.
   uploaded_provenance: dict[str, Any] = dataclasses.field(default_factory=dict)
+  # Re-renders the manifest for another JobSet name (retries of fixed-name
+  # JobSets must not reuse the name: see `retry_copy`).
+  render_manifest: Optional[Callable[[str], str]] = dataclasses.field(
+      default=None, repr=False, compare=False
+  )
 
   def retry_copy(self) -> "ActiveWorkload":
-    """Returns a fresh copy of this workload for its next attempt."""
+    """Returns a fresh copy of this workload for its next attempt.
+
+    A Pathways JobSet gets a new name (`<base>-r<attempt>`, kept within
+    `PATHWAYS_WORKLOAD_NAME_MAX_LEN`): its head is addressed by a DNS name
+    derived from the JobSet name, and a new resource manager that starts
+    while the old head is still terminating registers with the old one and
+    is killed by its watchdog, which is exactly the hang being retried.
+    """
     error = f"attempt {self.attempt}: {self.status}: {self.error_message}"
+    attempt = self.attempt + 1
+    base = self.base_name or self.workload_name
+    name = retry_workload_name(base, attempt) if self.fixed_name else base
+    manifest = self.manifest_yaml
+    if self.fixed_name and self.render_manifest is not None:
+      manifest = self.render_manifest(name)
     return dataclasses.replace(
         self,
-        workload_name=self.base_name or self.workload_name,
+        workload_name=name,
+        manifest_yaml=manifest,
         start_time=time.time(),
         status="SUBMITTED",
         ready_pods=0,
@@ -222,7 +241,7 @@ class ActiveWorkload:
         error_message=None,
         terminal=False,
         cleaned_up=False,
-        attempt=self.attempt + 1,
+        attempt=attempt,
         previous_errors=self.previous_errors + [error],
         uploaded_provenance={},
     )
@@ -459,6 +478,17 @@ def runtime_workload_name(
   clean = re.sub(r"[^a-z0-9-]", "-", f"{runtime.name}-{config_name}".lower())
   name = re.sub(r"-+", "-", f"tpums-{clean}").strip("-")
   return name[:PATHWAYS_WORKLOAD_NAME_MAX_LEN].rstrip("-")
+
+
+def retry_workload_name(base_name: str, attempt: int) -> str:
+  """Returns the JobSet name of attempt `attempt` (>= 2) of a fixed-name workload.
+
+  `<base>-r<attempt>`, with the base truncated so the whole name stays within
+  `PATHWAYS_WORKLOAD_NAME_MAX_LEN`, e.g. `tpums-rapid-all-gat-r2`.
+  """
+  suffix = f"-r{attempt}"
+  stem = base_name[: PATHWAYS_WORKLOAD_NAME_MAX_LEN - len(suffix)].rstrip("-")
+  return f"{stem}{suffix}"
 
 
 def generate_pathways_manifest(
@@ -1345,22 +1375,35 @@ class WorkloadManager:
             self.accelerator, config_path=rel_path, topology=topology
         )
         topo_info = utils.compute_topology_info(topology, accelerator=acc)
+        render_manifest: Optional[Callable[[str], str]] = None
         if runtime.is_pathways:
-          manifest = generate_pathways_manifest(
-              workload_name=workload_name,
-              namespace=self.namespace,
-              queue_name=self.queue,
-              priority_class=self.priority,
-              topology=topology,
-              docker_image=self.docker_image,
-              config_rel_path=rel_path,
-              gcs_output_dir=gcs_output_dir,
-              runtime=runtime,
-              git_repo=self.git_repo,
-              git_branch=self.git_branch,
-              accelerator=acc,
-              pod_priority_class=self.pod_priority_class,
-          )
+
+          def render_manifest(
+              name: str,
+              *,
+              _rt: runtimes_lib.Runtime = runtime,
+              _rel: str = rel_path,
+              _topo: str = topology,
+              _gcs: str = gcs_output_dir,
+              _acc: str = acc,
+          ) -> str:
+            return generate_pathways_manifest(
+                workload_name=name,
+                namespace=self.namespace,
+                queue_name=self.queue,
+                priority_class=self.priority,
+                topology=_topo,
+                docker_image=self.docker_image,
+                config_rel_path=_rel,
+                gcs_output_dir=_gcs,
+                runtime=_rt,
+                git_repo=self.git_repo,
+                git_branch=self.git_branch,
+                accelerator=_acc,
+                pod_priority_class=self.pod_priority_class,
+            )
+
+          manifest = render_manifest(workload_name)
           # The Pathways head pod plus one pod per TPU host.
           total_pods = topo_info["num_nodes"] + 1
         else:
@@ -1420,6 +1463,7 @@ class WorkloadManager:
             provenance=dict(provenance),
             fixed_name=runtime.is_pathways,
             base_name=workload_name,
+            render_manifest=render_manifest,
         )
 
     return dry_run_results

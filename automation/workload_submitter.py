@@ -203,6 +203,9 @@ class ActiveWorkload:
   # increment it and keep the earlier errors.
   attempt: int = 1
   previous_errors: list[str] = dataclasses.field(default_factory=list)
+  # Provenance as last written to provenance.json; pod image digests learnt
+  # while polling make it stale, and it is re-uploaded on completion.
+  uploaded_provenance: dict[str, Any] = dataclasses.field(default_factory=dict)
 
   def retry_copy(self) -> "ActiveWorkload":
     """Returns a fresh copy of this workload for its next attempt."""
@@ -221,6 +224,7 @@ class ActiveWorkload:
         cleaned_up=False,
         attempt=self.attempt + 1,
         previous_errors=self.previous_errors + [error],
+        uploaded_provenance={},
     )
 
 
@@ -879,6 +883,67 @@ def _timeout_seconds(timeout_minutes: Optional[int]) -> Optional[int]:
   )
 
 
+# Container name -> provenance key of the image digest the kubelet reports.
+# The Pathways resource manager and workers share the server image.
+_DIGEST_CONTAINERS: dict[str, str] = {
+    "pathways-rm": "pathways_server_digest",
+    "pathways-worker": "pathways_server_digest",
+    "pathways-proxy": "pathways_proxy_digest",
+    "user-workload": "client_image_digest",
+    "jax-tpu": "client_image_digest",
+}
+_DIGEST_RE = re.compile(r"(sha256:[0-9a-f]{64})")
+
+
+def pod_image_digests(pod_list: list[dict[str, Any]]) -> dict[str, str]:
+  """Returns the image digests the kubelet pulled for a workload's pods.
+
+  `status.*ContainerStatuses[].imageID` is the digest that actually ran, so
+  it is authoritative for a floating tag like `latest`, and reading it needs
+  no registry permission.
+
+  Args:
+    pod_list: `kubectl get pods` items of one JobSet.
+
+  Returns:
+    Provenance keys of `_DIGEST_CONTAINERS` mapped to `sha256:...` digests.
+  """
+  digests: dict[str, str] = {}
+  for pod in pod_list:
+    status = pod.get("status", {})
+    for cs in status.get("initContainerStatuses", []) + status.get(
+        "containerStatuses", []
+    ):
+      key = _DIGEST_CONTAINERS.get(cs.get("name", ""))
+      if key is None or key in digests:
+        continue
+      match = _DIGEST_RE.search(cs.get("imageID") or "")
+      if match:
+        digests[key] = match.group(1)
+  return digests
+
+
+def record_pod_digests(
+    wl: ActiveWorkload, pod_list: list[dict[str, Any]]
+) -> bool:
+  """Adds the digests of `pod_list` to `wl.provenance`; True if it changed.
+
+  A digest resolved from the registry at submission time is kept unless the
+  pods ran something else (the tag moved in between), in which case the pod's
+  digest wins and the registry one is kept as `<key>_at_submission`.
+  """
+  changed = False
+  for key, digest in pod_image_digests(pod_list).items():
+    current = wl.provenance.get(key)
+    if current == digest:
+      continue
+    if current:
+      wl.provenance.setdefault(f"{key}_at_submission", current)
+    wl.provenance[key] = digest
+    changed = True
+  return changed
+
+
 def update_workload_states(
     active_workloads: dict[str, ActiveWorkload],
     jobsets_data: dict[str, dict[str, Any]],
@@ -920,6 +985,7 @@ def update_workload_states(
     failed_count = 0
     any_running = False
     if pod_list:
+      record_pod_digests(wl, pod_list)
       for pod in pod_list:
         status_dict = pod.get("status", {})
         phase = status_dict.get("phase", "")
@@ -1261,7 +1327,8 @@ class WorkloadManager:
             start_time=time.time(),
             total_pods=total_pods,
             runtime=runtime.name,
-            provenance=provenance,
+            # Own copy: pod image digests are recorded per workload.
+            provenance=dict(provenance),
             fixed_name=runtime.is_pathways,
             base_name=workload_name,
         )
@@ -1326,6 +1393,7 @@ class WorkloadManager:
       wl.workload_name = apply_jobset(wl.manifest_yaml)
       key = wl.workload_name
       upload_provenance(wl.gcs_output_dir, wl.provenance)
+      wl.uploaded_provenance = dict(wl.provenance)
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.error("Failed to apply JobSet %s: %s", name, e)
       wl.status = "FAILED"
@@ -1363,6 +1431,17 @@ class WorkloadManager:
       if (not only_terminal or wl.terminal) and not wl.cleaned_up:
         # Failed deletes stay un-cleaned and are retried on the next tick.
         wl.cleaned_up = delete_jobset(name, self.namespace)
+
+  def _refresh_provenance(self) -> None:
+    """Re-uploads provenance.json of finished workloads whose pods added digests."""
+    for wl in self.active_workloads.values():
+      if (
+          wl.terminal
+          and not self.dry_run
+          and wl.provenance != wl.uploaded_provenance
+      ):
+        upload_provenance(wl.gcs_output_dir, wl.provenance)
+        wl.uploaded_provenance = dict(wl.provenance)
 
   def poll(self) -> list[BenchmarkResult]:
     """Monitors active workloads in parallel with periodic status dashboards and immediate cleanup."""
@@ -1443,6 +1522,9 @@ class WorkloadManager:
           pods_data,
           timeout_minutes=self.timeout_minutes,
       )
+      # Before cleanup deletes the pods: their image digests go into
+      # provenance.json.
+      self._refresh_provenance()
       if self.retries and self._requeue_failed():
         _clear_dashboard()
         all_done = False

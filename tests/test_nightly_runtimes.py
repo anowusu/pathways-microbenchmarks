@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -317,6 +318,90 @@ class RetryTest(absltest.TestCase):
     manager.active_workloads = {wl.workload_name: wl}
     self.assertEqual(manager._requeue_failed(), 0)
     self.assertIn(wl.workload_name, manager.active_workloads)
+
+
+class PodDigestTest(absltest.TestCase):
+  """Image digests come from the pods' imageID, no registry permission needed."""
+
+  _SERVER = "sha256:" + "a" * 64
+  _PROXY = "sha256:" + "b" * 64
+  _CLIENT = "sha256:" + "c" * 64
+
+  def _pods(self):
+    head = {"status": {
+        "initContainerStatuses": [
+            {"name": "pathways-rm", "imageID": f"us-docker.pkg.dev/p/pathways/server@{self._SERVER}"},
+            {"name": "pathways-proxy", "imageID": f"us-docker.pkg.dev/p/pathways/proxy_server@{self._PROXY}"},
+        ],
+        "containerStatuses": [
+            {"name": "user-workload", "imageID": f"docker-pullable://us-docker.pkg.dev/c/tpu@{self._CLIENT}"},
+        ],
+    }}
+    worker = {"status": {"containerStatuses": [
+        {"name": "pathways-worker", "imageID": f"us-docker.pkg.dev/p/pathways/server@{self._SERVER}"},
+        {"name": "sidecar", "imageID": "other@sha256:" + "d" * 64},
+    ]}}
+    return [head, worker]
+
+  def test_pod_image_digests(self):
+    self.assertEqual(
+        workload_submitter.pod_image_digests(self._pods()),
+        {
+            "pathways_server_digest": self._SERVER,
+            "pathways_proxy_digest": self._PROXY,
+            "client_image_digest": self._CLIENT,
+        },
+    )
+    self.assertEqual(workload_submitter.pod_image_digests([{"status": {}}]), {})
+
+  def test_record_pod_digests_keeps_registry_digest_when_tag_moved(self):
+    wl = workload_submitter.ActiveWorkload(
+        workload_name="tpums-rapid-gemm", config_name="gemm",
+        config_rel_path="configs/v5e/4x8/gemm.yaml", topology="4x8",
+        manifest_yaml="", gcs_output_dir="gs://b/d/rapid/gemm", start_time=0.0,
+        total_pods=9, runtime="rapid",
+        provenance={"runtime": "rapid", "pathways_server_digest": "sha256:old"},
+    )
+    self.assertTrue(workload_submitter.record_pod_digests(wl, self._pods()))
+    self.assertEqual(wl.provenance["pathways_server_digest"], self._SERVER)
+    self.assertEqual(wl.provenance["pathways_server_digest_at_submission"], "sha256:old")
+    self.assertEqual(wl.provenance["pathways_proxy_digest"], self._PROXY)
+    self.assertEqual(wl.provenance["client_image_digest"], self._CLIENT)
+    # Idempotent once recorded.
+    self.assertFalse(workload_submitter.record_pod_digests(wl, self._pods()))
+
+  @mock.patch.object(workload_submitter, "upload_provenance")
+  @mock.patch.object(workload_submitter, "delete_jobset", return_value=True)
+  @mock.patch.object(workload_submitter, "fetch_namespace_pods")
+  @mock.patch.object(workload_submitter, "fetch_namespace_jobsets")
+  def test_poll_reuploads_provenance_with_pod_digests(
+      self, mock_jobsets, mock_pods, mock_delete, mock_upload
+  ):
+    del mock_delete  # Unused.
+    name = "tpums-4x8-mcjax-gemm-abcde"
+    wl = workload_submitter.ActiveWorkload(
+        workload_name=name, config_name="gemm",
+        config_rel_path="configs/v5e/4x8/gemm.yaml", topology="4x8",
+        manifest_yaml="", gcs_output_dir="gs://b/d/mcjax/gemm",
+        start_time=time.time(), total_pods=1, runtime="mcjax",
+        provenance={"runtime": "mcjax", "git_commit": "abc"},
+        uploaded_provenance={"runtime": "mcjax", "git_commit": "abc"},
+    )
+    mock_jobsets.return_value = {name: {"status": {"conditions": [
+        {"type": "Completed", "status": "True"}]}}}
+    mock_pods.return_value = {name: [{"status": {"phase": "Succeeded", "containerStatuses": [
+        {"name": "jax-tpu", "imageID": f"us-docker.pkg.dev/c/tpu@{self._CLIENT}"}]}}]}
+    manager = workload_submitter.WorkloadManager(
+        timeout_minutes=1, poll_interval_seconds=1, tick_interval_seconds=0,
+        cleanup=True, active_workloads={name: wl},
+    )
+    results = manager.poll()
+    self.assertEqual(results[0].status, "SUCCESS")
+    self.assertEqual(results[0].provenance["client_image_digest"], self._CLIENT)
+    mock_upload.assert_called_once_with(
+        "gs://b/d/mcjax/gemm",
+        {"runtime": "mcjax", "git_commit": "abc", "client_image_digest": self._CLIENT},
+    )
 
 
 class RuntimeComparisonTest(absltest.TestCase):

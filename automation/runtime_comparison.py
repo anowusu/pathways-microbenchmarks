@@ -232,6 +232,7 @@ def runtime_provenance_summary(
           "git_commit",
           "jax_version",
           "libtpu_version",
+          "client_image_digest",
           "pathways_server_image",
           "pathways_server_digest",
           "pathways_proxy_image",

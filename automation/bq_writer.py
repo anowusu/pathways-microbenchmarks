@@ -307,18 +307,24 @@ def build_records(
   return records
 
 
-def write_records(table: str, records: Sequence[Mapping[str, Any]]) -> int:
-  """Streams `records` into `table` (`project.dataset.table`), creating it.
+def write_records(
+    table: str, records: Sequence[Mapping[str, Any]], replace_run: bool = True
+) -> int:
+  """Loads `records` into `table` (`project.dataset.table`), creating it.
 
   Args:
     table: Fully-qualified BigQuery table id.
     records: Records from `build_records`.
+    replace_run: Delete the rows of the same `run_name` first, so re-running
+      a day replaces its rows instead of duplicating them. Rows still in the
+      streaming buffer of an older writer cannot be deleted; that is logged
+      and the new rows are loaded anyway.
 
   Returns:
     The number of rows written.
 
   Raises:
-    RuntimeError: If BigQuery rejects any row.
+    RuntimeError: If BigQuery rejects the load.
   """
   if not records:
     logging.warning("No BigQuery records to write to %s.", table)
@@ -327,6 +333,7 @@ def write_records(table: str, records: Sequence[Mapping[str, Any]]) -> int:
   from google.cloud import bigquery  # pylint: disable=g-import-not-at-top
 
   project, dataset_id, table_id = table.split(".")
+  del table_id  # The fully-qualified id is used below.
   client = bigquery.Client(project=project)
   dataset = bigquery.Dataset(f"{project}.{dataset_id}")
   dataset.location = "US"
@@ -335,8 +342,50 @@ def write_records(table: str, records: Sequence[Mapping[str, Any]]) -> int:
   bq_table = bigquery.Table(table, schema=schema)
   bq_table.time_partitioning = bigquery.TimePartitioning(field="start_time")
   client.create_table(bq_table, exists_ok=True)
-  errors = client.insert_rows_json(table, list(records))
-  if errors:
-    raise RuntimeError(f"BigQuery rejected {len(errors)} row(s): {errors[:3]}")
+
+  if replace_run:
+    for run_name in sorted({str(r.get("run_name", "")) for r in records}):
+      try:
+        job = client.query(
+            f"DELETE FROM `{table}` WHERE run_name = @run_name",
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter(
+                        "run_name", "STRING", run_name
+                    )
+                ]
+            ),
+        )
+        job.result()
+        if job.num_dml_affected_rows:
+          logging.info(
+              "Replaced %d earlier row(s) of %s in %s.",
+              job.num_dml_affected_rows,
+              run_name,
+              table,
+          )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Earlier rows of %s stay in %s (delete failed: %s).",
+            run_name,
+            table,
+            e,
+        )
+
+  # A load job (not streaming inserts): free, and the rows are deletable at
+  # once, which is what makes the next re-run's replace work.
+  load_job = client.load_table_from_json(
+      list(records),
+      table,
+      job_config=bigquery.LoadJobConfig(
+          schema=schema,
+          write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+      ),
+  )
+  load_job.result()
+  if load_job.errors:
+    raise RuntimeError(
+        f"BigQuery rejected the load into {table}: {load_job.errors[:3]}"
+    )
   logging.info("Wrote %d row(s) to BigQuery table %s.", len(records), table)
   return len(records)

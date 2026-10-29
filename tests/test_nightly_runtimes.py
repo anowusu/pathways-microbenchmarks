@@ -511,7 +511,36 @@ class BqWriterTest(absltest.TestCase):
     self.assertEqual(records[0]["metrics_time_per_iter_ms_p50"], 19.9)
     self.assertEqual(records[0]["logs_artifact_directory"], "gs://b/2026-10-29/louhi/all_gather")
     self.assertEqual(records[0]["run_name"], "tpums-nightly-2026-10-29")
-    self.assertEqual(records[0]["run_id"], "tpums-nightly-2026-10-29_louhi_collectives_0")
+    self.assertRegex(
+        records[0]["run_id"],
+        r"^tpums-nightly-2026-10-29_louhi_AllGatherBenchmark_[0-9a-f]{10}$",
+    )
+
+  def test_case_run_id_is_stable_and_ignores_metrics_and_provenance(self):
+    base = _row("rapid", "1.0", "2.0", client_image_digest="sha256:aaa", git_commit="c1")
+    rerun = _row("rapid", "1.1", "2.3", client_image_digest="sha256:bbb", git_commit="c2")
+    other_case = _row("rapid", "1.0", "2.0", matrix_dim="16384")
+    ids = []
+    for row in (base, rerun, other_case):
+      record = bq_writer.row_to_record(
+          row, "collectives", run_name="n", started_at=datetime.datetime.now(datetime.timezone.utc),
+          accelerator="v5e", container_image="img", artifacts_dir="gs://a", region="r",
+          cluster="c", user="me",
+      )
+      ids.append(record["run_id"])
+      params = json.loads(record["params_other"])
+      self.assertNotIn("git_commit", params)
+      self.assertEqual(params["runtime"], "rapid")
+    self.assertEqual(ids[0], ids[1])  # same case, different night metrics/build
+    self.assertNotEqual(ids[0], ids[2])  # different matrix_dim
+    self.assertEqual(
+        json.loads(bq_writer.row_to_record(
+            base, "collectives", run_name="n", started_at=datetime.datetime.now(datetime.timezone.utc),
+            accelerator="v5e", container_image="img", artifacts_dir="gs://a", region="r",
+            cluster="c", user="me",
+        )["params_other"])["client_image_digest"],
+        "sha256:aaa",
+    )
 
 
 class AggregatorRuntimeStampTest(absltest.TestCase):

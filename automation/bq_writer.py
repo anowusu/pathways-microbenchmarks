@@ -25,6 +25,7 @@ holds every timing and throughput column of summary.csv.
 from collections.abc import Mapping, Sequence
 import datetime
 import getpass
+import hashlib
 import json
 import logging
 import math
@@ -148,12 +149,39 @@ def benchmark_type_of(category: str) -> str:
   return "collective" if category == "collectives" else "compute"
 
 
+# Row columns that identify the build, not the benchmark case.
+_PROVENANCE_KEYS = ("runtime", "benchmark", "git_commit", "client_image_digest")
+
+
+def case_run_id(
+    run_name: str, runtime: str, benchmark: str, params: Mapping[str, Any]
+) -> str:
+  """Returns a `run_id` that is the same every time this case is measured.
+
+  `<run_name>_<runtime>_<benchmark>_<hash of the benchmark parameters>`, so a
+  re-run of a day (or of one config) replaces its own rows and nothing else.
+
+  Args:
+    run_name: The night's run name.
+    runtime: Runtime the case ran on.
+    benchmark: Benchmark class name from summary.csv.
+    params: The case's parameters (summary.csv columns that are neither
+      metrics nor platform or provenance columns).
+  """
+  digest = hashlib.sha1(
+      json.dumps(
+          {k: str(v) for k, v in params.items()}, sort_keys=True
+      ).encode("utf-8")
+  ).hexdigest()[:10]
+  return f"{run_name}_{runtime}_{benchmark}_{digest}"
+
+
 def row_to_record(
     row: Mapping[str, Any],
     category: str,
     *,
     run_name: str,
-    run_id: str,
+    run_id: Optional[str] = None,
     started_at: datetime.datetime,
     accelerator: str,
     container_image: str,
@@ -168,7 +196,8 @@ def row_to_record(
     row: Aggregated row (with the runtime columns stamped).
     category: Aggregator category of the row.
     run_name: The night's run name, shared by all its rows.
-    run_id: Unique id of this row.
+    run_id: Id of this row; defaults to `case_run_id()`, which is stable
+      across re-runs of the same case so `write_records` can replace it.
     started_at: When the night started (summary.csv has no timestamps).
     accelerator: TPU family, e.g. `v5e`.
     container_image: Client image.
@@ -184,12 +213,16 @@ def row_to_record(
       for k, v in row.items()
       if not _is_metric(k)
       and k not in _PLATFORM_KEYS
-      and k not in ("runtime", "benchmark", "git_commit")
+      and k not in _PROVENANCE_KEYS
       and not k.startswith("pathways_")
   }
+  if run_id is None:
+    run_id = case_run_id(run_name, runtime, str(row.get("benchmark", "")), params)
   params["test_name"] = row.get("benchmark", "")
   params["runtime"] = runtime
   params["platform"] = {k: row.get(k, "") for k in _PLATFORM_KEYS}
+  if row.get("client_image_digest"):
+    params["client_image_digest"] = row["client_image_digest"]
   if runtime != runtimes_lib.MCJAX.name:
     params["pathways"] = {
         "server_image": row.get("pathways_server_image", ""),
@@ -281,7 +314,7 @@ def build_records(
   run_name = f"{RUN_SOURCE}-{date_str}"
   records = []
   for category, rows in categorized_metrics.items():
-    for index, row in enumerate(rows):
+    for row in rows:
       runtime = str(row.get("runtime") or runtimes_lib.MCJAX.name)
       artifacts = artifacts_by_key.get((runtime, str(row.get("benchmark"))), "")
       if not artifacts:
@@ -294,7 +327,6 @@ def build_records(
               row,
               category,
               run_name=run_name,
-              run_id=f"{run_name}_{runtime}_{category}_{index}",
               started_at=started_at,
               accelerator=accelerator,
               container_image=container_image,
@@ -308,17 +340,18 @@ def build_records(
 
 
 def write_records(
-    table: str, records: Sequence[Mapping[str, Any]], replace_run: bool = True
+    table: str, records: Sequence[Mapping[str, Any]], replace: bool = True
 ) -> int:
   """Loads `records` into `table` (`project.dataset.table`), creating it.
 
   Args:
     table: Fully-qualified BigQuery table id.
     records: Records from `build_records`.
-    replace_run: Delete the rows of the same `run_name` first, so re-running
-      a day replaces its rows instead of duplicating them. Rows still in the
-      streaming buffer of an older writer cannot be deleted; that is logged
-      and the new rows are loaded anyway.
+    replace: Delete rows with the same `run_id`s first (`case_run_id` is
+      stable per case), so re-running a day or a config replaces its rows
+      instead of duplicating them. Rows still in the streaming buffer of an
+      older writer cannot be deleted; that is logged and the new rows are
+      loaded anyway.
 
   Returns:
     The number of rows written.
@@ -343,34 +376,30 @@ def write_records(
   bq_table.time_partitioning = bigquery.TimePartitioning(field="start_time")
   client.create_table(bq_table, exists_ok=True)
 
-  if replace_run:
-    for run_name in sorted({str(r.get("run_name", "")) for r in records}):
-      try:
-        job = client.query(
-            f"DELETE FROM `{table}` WHERE run_name = @run_name",
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter(
-                        "run_name", "STRING", run_name
-                    )
-                ]
-            ),
-        )
-        job.result()
-        if job.num_dml_affected_rows:
-          logging.info(
-              "Replaced %d earlier row(s) of %s in %s.",
-              job.num_dml_affected_rows,
-              run_name,
-              table,
-          )
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning(
-            "Earlier rows of %s stay in %s (delete failed: %s).",
-            run_name,
+  if replace:
+    run_ids = sorted({str(r.get("run_id", "")) for r in records})
+    try:
+      job = client.query(
+          f"DELETE FROM `{table}` WHERE run_id IN UNNEST(@run_ids)",
+          job_config=bigquery.QueryJobConfig(
+              query_parameters=[
+                  bigquery.ArrayQueryParameter("run_ids", "STRING", run_ids)
+              ]
+          ),
+      )
+      job.result()
+      if job.num_dml_affected_rows:
+        logging.info(
+            "Replaced %d earlier row(s) of these cases in %s.",
+            job.num_dml_affected_rows,
             table,
-            e,
         )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning(
+          "Earlier rows of these cases stay in %s (delete failed: %s).",
+          table,
+          e,
+      )
 
   # A load job (not streaming inserts): free, and the rows are deletable at
   # once, which is what makes the next re-run's replace work.

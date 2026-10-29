@@ -32,18 +32,24 @@ gs://cloud-pathways-staging/tpums-nightly/
 └── reports/latest.{md,html}           always the most recent run
 ```
 
-`provenance.json` records the exact Pathways image digests, every tag alias of
-that digest (e.g. `20261029_1817-jax_0.12.0`, `sha-…`) and the git commit of
-the benchmark code; the aggregator stamps these onto every row as the
-`runtime`, `pathways_server_digest`, … columns.
+`provenance.json` records the git commit of the benchmark code and, for the
+Pathways runtimes, the image digests: resolved from Artifact Registry at
+submission when the caller may (with every tag alias of that digest, e.g.
+`20261029_1817-jax_0.12.0`, `sha-…`), and always from the digests the kubelet
+reports for the pods (`client_image_digest` for the JAX client image too),
+which is what actually ran. The aggregator stamps these onto every row as the
+`runtime`, `pathways_server_digest`, `client_image_digest`, … columns.
 
 BigQuery: `cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks`
 (created on first write) uses uBench's `MicrobenchmarkSchema` column names, so
 rows can be copied into uBench's tables later. `run_name` / `run_group` are
-`tpums-nightly-<date>`, `run_id` is `<run_name>_<runtime>_<config>_<n>`, the
-runtime is `params_other.runtime`, `metrics_other` carries the full
-`summary.csv` metric set, and Pathways rows put the server / proxy images and
-digests in `configs_container_image` and `params_other`.
+`tpums-nightly-<date>`, `run_id` is
+`<run_name>_<runtime>_<benchmark>_<hash of the case parameters>` and stable
+across re-runs (a re-run of a day, or of one config, replaces its own rows
+via a load job instead of duplicating them), the runtime is
+`params_other.runtime`, `metrics_other` carries the full `summary.csv` metric
+set, and Pathways rows put the server / proxy images and digests in
+`configs_container_image` and `params_other`.
 
 ```sql
 SELECT JSON_VALUE(params_other, '$.runtime') AS runtime, benchmark_name,

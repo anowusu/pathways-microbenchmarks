@@ -23,6 +23,7 @@ import time
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
+from automation import runtimes
 from automation import utils
 from automation import workload_submitter
 import yaml
@@ -1119,44 +1120,56 @@ class WorkloadSubmitterTest(parameterized.TestCase):
     with self.assertRaises(FileNotFoundError):
       workload_submitter.apply_jobset("apiVersion: v1\n")
 
+  @mock.patch.object(workload_submitter, "upload_provenance")
+  @mock.patch.object(runtimes, "runtime_provenance", return_value={})
   @mock.patch.object(
       workload_submitter, "apply_jobset", side_effect=RuntimeError("no name")
   )
   def test_workload_manager_submit_all_marks_failed_on_apply_error(
-      self, mock_apply
+      self, mock_apply, mock_provenance, mock_upload
   ):
     """apply_jobset errors mark the workload FAILED under its original key."""
-    del mock_apply  # Unused.
+    del mock_apply, mock_provenance, mock_upload  # Unused.
     cfg_path = pathlib.Path(_CONFIG_DIR) / "2x2x1" / "gemm.yaml"
     manager = workload_submitter.WorkloadManager(gcs_bucket="gs://test-bucket")
     manager.prepare_workloads([cfg_path])
     manager.submit_all()
-    wl = manager.active_workloads["tpums-2x2x1-gemm"]
+    wl = manager.active_workloads["tpums-2x2x1-mcjax-gemm"]
     self.assertEqual(wl.status, "FAILED")
     self.assertTrue(wl.terminal)
     self.assertIn("no name", wl.error_message)
 
+  @mock.patch.object(workload_submitter, "upload_provenance")
+  @mock.patch.object(runtimes, "runtime_provenance", return_value={})
   @mock.patch.object(workload_submitter, "apply_jobset")
-  def test_workload_manager_prepare_and_submit(self, mock_apply):
+  def test_workload_manager_prepare_and_submit(
+      self, mock_apply, mock_provenance, mock_upload
+  ):
     """Verifies submit_all re-keys active_workloads by generated JobSet name."""
-    mock_apply.return_value = "tpums-2x2x1-gemm-xyz99"
+    del mock_provenance, mock_upload  # Unused.
+    mock_apply.return_value = "tpums-2x2x1-mcjax-gemm-xyz99"
     cfg_path = pathlib.Path(_CONFIG_DIR) / "2x2x1" / "gemm.yaml"
     manager = workload_submitter.WorkloadManager(
         gcs_bucket="gs://test-bucket", dry_run=False
     )
     dry_run_results = manager.prepare_workloads([cfg_path])
     self.assertEqual(dry_run_results, [])
-    self.assertLen(manager.active_workloads, 1)
+    # Prepared workloads wait in pending_workloads until submit_all().
+    self.assertLen(manager.pending_workloads, 1)
+    self.assertEmpty(manager.active_workloads)
 
     manager.submit_all()
     mock_apply.assert_called_once()
-    self.assertIn("tpums-2x2x1-gemm-xyz99", manager.active_workloads)
-    self.assertNotIn("tpums-2x2x1-gemm", manager.active_workloads)
-    wl = manager.active_workloads["tpums-2x2x1-gemm-xyz99"]
-    self.assertEqual(wl.workload_name, "tpums-2x2x1-gemm-xyz99")
-    self.assertTrue(wl.gcs_output_dir.endswith("/tpums-2x2x1-gemm"))
+    self.assertEmpty(manager.pending_workloads)
+    self.assertIn("tpums-2x2x1-mcjax-gemm-xyz99", manager.active_workloads)
+    self.assertNotIn("tpums-2x2x1-mcjax-gemm", manager.active_workloads)
+    wl = manager.active_workloads["tpums-2x2x1-mcjax-gemm-xyz99"]
+    self.assertEqual(wl.workload_name, "tpums-2x2x1-mcjax-gemm-xyz99")
+    self.assertEqual(wl.base_name, "tpums-2x2x1-mcjax-gemm")
+    # One results directory per runtime and config.
+    self.assertTrue(wl.gcs_output_dir.endswith("/mcjax/gemm"))
     self.assertIn(
-        "tpums-2x2x1-gemm-xyz99",
+        "tpums-2x2x1-mcjax-gemm-xyz99",
         workload_submitter.render_status_dashboard(
             manager.active_workloads, manager.start_time
         ),
@@ -1249,10 +1262,12 @@ class WorkloadSubmitterTest(parameterized.TestCase):
     manager = workload_submitter.WorkloadManager(gcs_bucket="gs://b")
     with mock.patch.object(
         utils, "compute_topology_info", wraps=utils.compute_topology_info
-    ) as spy_topo:
+    ) as spy_topo, mock.patch.object(
+        runtimes, "runtime_provenance", return_value={}
+    ):
       manager.prepare_workloads([utils.PACKAGE_ROOT / cfg_rel])
     self.assertEqual(spy_topo.call_count, 1)
-    wl = next(iter(manager.active_workloads.values()))
+    wl = next(iter(manager.pending_workloads.values()))
     self.assertEqual(wl.total_pods, expected_pods)
 
   def test_active_workload_topology_pods_and_dashboard_alignment(self):

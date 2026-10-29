@@ -128,6 +128,44 @@ def _default_output_report(
   return f"{base}_{now_utc.strftime('%Y%m%d')}.{ext}"
 
 
+def _result_from_gcs_entry(
+    entry: dict[str, Any],
+) -> workload_submitter.BenchmarkResult:
+  """Wraps a `discover_and_fetch_gcs_results` entry as a BenchmarkResult."""
+  return workload_submitter.BenchmarkResult(
+      workload_name=entry["workload_name"],
+      config_name=entry["config_name"],
+      config_rel_path="",
+      topology=entry["topology"],
+      status="SUCCESS",
+      duration_seconds=0.0,
+      gcs_artifact_path=entry["gcs_artifact_path"],
+      metrics=entry["metrics"],
+      runtime=entry.get("runtime") or runtimes_lib.MCJAX.name,
+      provenance=entry.get("provenance") or {},
+  )
+
+
+def day_results(
+    gcs_bucket: str,
+    date_str: str,
+    run_results: Sequence[workload_submitter.BenchmarkResult],
+) -> list[workload_submitter.BenchmarkResult]:
+  """Returns every result of the day found on GCS, else this run's results.
+
+  The day's GCS prefix is the unit of reporting: a re-run of the day, or of a
+  single config, overwrites that config's `summary.csv` and then aggregates
+  the whole day again, so the report and BigQuery always show the day's
+  latest measurement per runtime and config rather than only this run's.
+  """
+  entries = metrics_aggregator.discover_and_fetch_gcs_results(
+      gcs_bucket, date_str=date_str
+  )
+  if not entries:
+    return list(run_results)
+  return [_result_from_gcs_entry(e) for e in entries]
+
+
 def run_pipeline(
     config_dir: Optional[str] = None,
     configs: Optional[list[str]] = None,
@@ -289,7 +327,15 @@ def run_pipeline(
   # ----------------------------------------------------------------------------
   # Metrics Aggregator: Ingest GCS metrics and aggregate by category
   # ----------------------------------------------------------------------------
-  raw_result_dicts = [dataclasses.asdict(r) for r in results]
+  # Aggregate the whole day found on GCS (this run's results included), so a
+  # partial or repeated run merges into the day's report instead of
+  # replacing it.
+  aggregated_results = (
+      day_results(gcs_bucket, date_str, results)
+      if gcs_bucket and not dry_run
+      else results
+  )
+  raw_result_dicts = [dataclasses.asdict(r) for r in aggregated_results]
   categorized_metrics = (
       metrics_aggregator.aggregate_and_upload_category_results(
           raw_results=raw_result_dicts,
@@ -324,7 +370,7 @@ def run_pipeline(
   if bq_table and not dry_run:
     write_bigquery(
         bq_table,
-        results,
+        aggregated_results,
         categorized_metrics,
         date_str=date_str,
         started_at=now_utc,

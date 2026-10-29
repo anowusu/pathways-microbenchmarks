@@ -18,9 +18,11 @@ import pathlib
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
+from automation import bq_writer
 from automation import metrics_aggregator
 from automation import nightly_runner
 from automation import report_generator
+from automation import runtimes
 from automation import utils
 from automation import workload_submitter
 
@@ -172,6 +174,9 @@ class NightlyRunnerTest(parameterized.TestCase):
         mock.patch.object(
             metrics_aggregator, "fetch_gcs_raw_metrics", return_value=metrics
         ),
+        mock.patch.object(
+            metrics_aggregator, "discover_and_fetch_gcs_results", return_value=[]
+        ),
         self.assertLogs(level="INFO") as logs,
     ):
       results = nightly_runner.run_pipeline(
@@ -185,6 +190,54 @@ class NightlyRunnerTest(parameterized.TestCase):
     self.assertIn(summary, "\n".join(logs.output))
     reported = self.mock_gen_report.call_args.kwargs["results"]
     self.assertEqual(reported[0].status, status)
+
+  def test_run_pipeline_aggregates_the_whole_day_from_gcs(self):
+    """A partial run re-aggregates every result of the day found on GCS."""
+    result = workload_submitter.BenchmarkResult(
+        workload_name="tpums-4x8-mcjax-hbm-abc12",
+        config_name="hbm",
+        config_rel_path="configs/v5e/4x8/hbm.yaml",
+        topology="4x8",
+        status="SUCCESS",
+        duration_seconds=1.0,
+        gcs_artifact_path="gs://b/2026-10-29/mcjax/hbm",
+        runtime="mcjax",
+    )
+    day = [
+        {
+            "workload_name": "hbm", "config_name": "hbm", "topology": "4x8",
+            "gcs_artifact_path": "gs://b/2026-10-29/mcjax/hbm", "status": "SUCCESS",
+            "metrics": [{"benchmark": "HBMBandwidthBenchmark", "_source_path": "gs://b/2026-10-29/mcjax/hbm/summary.csv"}],
+            "runtime": "mcjax", "provenance": {"runtime": "mcjax"},
+        },
+        {
+            "workload_name": "gemm", "config_name": "gemm", "topology": "4x8",
+            "gcs_artifact_path": "gs://b/2026-10-29/rapid/gemm", "status": "SUCCESS",
+            "metrics": [{"benchmark": "GeneralizedGemmBenchmark", "_source_path": "gs://b/2026-10-29/rapid/gemm/summary.csv"}],
+            "runtime": "rapid", "provenance": {"runtime": "rapid", "pathways_server_digest": "sha256:x"},
+        },
+    ]
+    with (
+        mock.patch.object(metrics_aggregator, "verify_gcs_bucket_accessible"),
+        mock.patch.object(workload_submitter, "submit_workloads", return_value=[result]),
+        mock.patch.object(metrics_aggregator, "fetch_gcs_raw_metrics", return_value=day[0]["metrics"]),
+        mock.patch.object(metrics_aggregator, "discover_and_fetch_gcs_results", return_value=day) as mock_discover,
+        mock.patch.object(bq_writer, "write_records", return_value=2) as mock_write,
+    ):
+      nightly_runner.run_pipeline(
+          configs=["configs/v5e/4x8/hbm.yaml"],
+          runtimes=[runtimes.MCJAX],
+          gcs_bucket="gs://b",
+          bq_table="p.d.t",
+          dry_run=False,
+      )
+    mock_discover.assert_called_once_with("gs://b", date_str=mock.ANY)
+    raw = self.mock_agg.call_args.kwargs["raw_results"]
+    self.assertEqual([(r["runtime"], r["config_name"]) for r in raw], [("mcjax", "hbm"), ("rapid", "gemm")])
+    self.assertEqual(raw[1]["provenance"]["pathways_server_digest"], "sha256:x")
+    # The execution summary still describes this run only.
+    self.assertLen(self.mock_gen_report.call_args.kwargs["results"], 1)
+    mock_write.assert_called_once()
 
   @mock.patch.object(nightly_runner, "run_pipeline")
   def test_main_forwards_accelerator_and_selection_flags(self, mock_run):

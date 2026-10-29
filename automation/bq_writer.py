@@ -157,6 +157,9 @@ _PROVENANCE_KEYS = (
     "client_image_digest",
     "node_pools",
 )
+# Per-measurement columns that stay in `params_other` but must not make the
+# case id differ between two measurements of the same case.
+_VOLATILE_KEYS = frozenset({"start", "end", "start_time", "end_time", "timestamp"})
 
 
 def case_run_id(
@@ -172,11 +175,12 @@ def case_run_id(
     runtime: Runtime the case ran on.
     benchmark: Benchmark class name from summary.csv.
     params: The case's parameters (summary.csv columns that are neither
-      metrics nor platform or provenance columns).
+      metrics nor platform or provenance columns); timestamps are ignored.
   """
   digest = hashlib.sha1(
       json.dumps(
-          {k: str(v) for k, v in params.items()}, sort_keys=True
+          {k: str(v) for k, v in params.items() if k not in _VOLATILE_KEYS},
+          sort_keys=True,
       ).encode("utf-8")
   ).hexdigest()[:10]
   return f"{run_name}_{runtime}_{benchmark}_{digest}"

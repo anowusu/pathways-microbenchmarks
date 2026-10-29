@@ -32,13 +32,17 @@ gs://cloud-pathways-staging/tpums-nightly/
 └── reports/latest.{md,html}           always the most recent run
 ```
 
-`provenance.json` records the git commit of the benchmark code and, for the
-Pathways runtimes, the image digests: resolved from Artifact Registry at
-submission when the caller may (with every tag alias of that digest, e.g.
-`20261029_1817-jax_0.12.0`, `sha-…`), and always from the digests the kubelet
-reports for the pods (`client_image_digest` for the JAX client image too),
-which is what actually ran. The aggregator stamps these onto every row as the
-`runtime`, `pathways_server_digest`, `client_image_digest`, … columns.
+`provenance.json` records the git commit of the benchmark code, the node
+pools the pods ran on (`node_pools`; GKE names TPU slice nodes
+`gke-tpu-<hash>-<id>`, so the prefix identifies the slice — microbenchmark
+numbers can differ between slices, and the comparison table shows it as
+`slice`) and, for the Pathways runtimes, the image digests: resolved from
+Artifact Registry at submission when the caller may (with every tag alias of
+that digest, e.g. `20261029_1817-jax_0.12.0`, `sha-…`), and always from the
+digests the kubelet reports for the pods (`client_image_digest` for the JAX
+client image too), which is what actually ran. The aggregator stamps these
+onto every row as the `runtime`, `pathways_server_digest`,
+`client_image_digest`, `node_pools`, … columns.
 
 BigQuery: `cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks`
 (created on first write) uses uBench's `MicrobenchmarkSchema` column names, so
@@ -120,11 +124,17 @@ PYTHONPATH=.:src python -m automation.nightly_runner \
   --bq-table cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks
 ```
 
-Useful variations: `--runtimes rapid --categories gemm` for one cell of the
-matrix, `--dry-run` to render the manifests only, `--no-cleanup` to keep the
-JobSets, and `python -m automation.metrics_aggregator` /
-`python -m automation.report_generator` to re-aggregate a day without
+Useful variations: `--runtimes rapid --configs configs/v5e/4x8/gemm.yaml` for
+one cell of the matrix, `--dry-run` to render the manifests only,
+`--no-cleanup` to keep the JobSets, and `python -m automation.metrics_aggregator`
+/ `python -m automation.report_generator` to re-aggregate a day without
 re-running anything (see [AUTOMATION.md](AUTOMATION.md)).
+
+The day is the unit of reporting: every run overwrites the `summary.csv` of
+the configs it ran and then aggregates **everything under the day's prefix**,
+so a partial or repeated run merges into the day's report and BigQuery rows
+(same `run_id` → replaced) instead of replacing the whole day. The report
+header's "JobSets: x/y" still describes the run that produced it.
 
 ### Cluster specifics worth knowing
 

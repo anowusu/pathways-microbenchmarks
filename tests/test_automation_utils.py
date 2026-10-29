@@ -182,7 +182,7 @@ class AutomationUtilsTest(parameterized.TestCase):
 
   def test_accelerator_configs_registry(self):
     """Registry entries are self-consistent for tpu7x and v6e."""
-    self.assertEqual(utils.SUPPORTED_ACCELERATORS, ("tpu7x", "v6e"))
+    self.assertEqual(utils.SUPPORTED_ACCELERATORS, ("tpu7x", "v6e", "v5e"))
     tpu7x_cfg = utils.ACCELERATOR_CONFIGS["tpu7x"]
     self.assertEqual(tpu7x_cfg.gke_accelerator_label, "tpu7x")
     self.assertEqual(tpu7x_cfg.suite_filename, "canonical_suite_v7x.yaml")
@@ -190,13 +190,41 @@ class AutomationUtilsTest(parameterized.TestCase):
     self.assertEqual(v6e_cfg.gke_accelerator_label, "tpu-v6e-slice")
     self.assertEqual(v6e_cfg.suite_filename, "canonical_suite_v6e.yaml")
     self.assertTrue(v6e_cfg.config_dir.endswith("configs/v6e"))
+    v5e_cfg = utils.ACCELERATOR_CONFIGS["v5e"]
+    self.assertEqual(v5e_cfg.gke_accelerator_label, "tpu-v5-lite-podslice")
+    self.assertEqual(v5e_cfg.suite_filename, "canonical_suite_v5e.yaml")
+    self.assertFalse(v5e_cfg.uses_placement_policy)
+    # v6e keeps bare 2D topologies; v5e needs a config path or --accelerator.
+    self.assertFalse(v5e_cfg.infer_from_topology)
     for acc, cfg in utils.ACCELERATOR_CONFIGS.items():
       self.assertEqual(cfg.accelerator, acc)
       for topology in cfg.known_topologies:
         self.assertIn(topology, utils.KNOWN_TOPOLOGIES)
         self.assertEqual(
-            utils.compute_topology_info(topology)["accelerator"], acc
+            utils.compute_topology_info(topology, accelerator=acc)[
+                "accelerator"
+            ],
+            acc,
         )
+        if cfg.infer_from_topology:
+          self.assertEqual(
+              utils.compute_topology_info(topology)["accelerator"], acc
+          )
+
+  def test_v5e_resolves_from_path_and_skips_placement_policy(self):
+    """v5e multi-host slices select no placement-policy node label."""
+    self.assertEqual(
+        utils.infer_accelerator(
+            config_path="configs/v5e/4x8/all_gather.yaml", topology="4x8"
+        ),
+        "v5e",
+    )
+    info = utils.compute_topology_info("4x8", accelerator="v5e")
+    self.assertEqual(info["num_nodes"], 8)
+    self.assertEqual(info["gke_accelerator"], "tpu-v5-lite-podslice")
+    self.assertIsNone(info["placement_policy"])
+    with self.assertRaisesRegex(ValueError, "Conflicting TPU accelerators"):
+      utils.infer_accelerator(accelerator="v5e", topology="2x2x1")
 
   @parameterized.named_parameters(
       # (topology, accelerator, num_nodes, chips/node, chips, cores, policy)

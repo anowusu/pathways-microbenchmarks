@@ -37,6 +37,10 @@ DEFAULT_PRIORITY = os.environ.get("PRIORITY", "medium")
 DEFAULT_DOCKER_IMAGE = os.environ.get(
     "DOCKER_IMAGE", "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
 )
+DEFAULT_GIT_REPO = os.environ.get(
+    "GIT_REPO",
+    "https://github.com/AI-Hypercomputer/accelerator-microbenchmarks.git",
+)
 DEFAULT_GIT_BRANCH = os.environ.get("GIT_BRANCH", "main")
 DEFAULT_GCS_BUCKET = os.environ.get("GCS_BUCKET", "")
 DEFAULT_RESERVATION_NAME = os.environ.get("RESERVATION_NAME", "")
@@ -68,6 +72,14 @@ class AcceleratorDefaultConfig:
   topology_dims: int
   known_topologies: tuple[str, ...]
   suite_filename: str
+  # Multi-host slices pin pods to a compact placement policy node label on
+  # the clusters the nightlies target; clusters without those labels (e.g.
+  # v5e test clusters) must not select on it or nothing schedules.
+  uses_placement_policy: bool = True
+  # Whether a bare topology identifies this accelerator. Only one accelerator
+  # per dimensionality may claim it; the others need an explicit accelerator
+  # or a config path.
+  infer_from_topology: bool = True
 
   @property
   def config_dir(self) -> str:
@@ -115,6 +127,26 @@ ACCELERATOR_CONFIGS: dict[str, AcceleratorDefaultConfig] = {
             "16x16",
         ),
         suite_filename="canonical_suite_v6e.yaml",
+    ),
+    "v5e": AcceleratorDefaultConfig(
+        accelerator="v5e",
+        gke_accelerator_label="tpu-v5-lite-podslice",
+        cores_per_chip=1,
+        default_chips_per_node=4,
+        topology_dims=2,
+        known_topologies=(
+            "1x1",
+            "2x2",
+            "2x4",
+            "4x4",
+            "4x8",
+            "8x8",
+            "8x16",
+            "16x16",
+        ),
+        suite_filename="canonical_suite_v5e.yaml",
+        uses_placement_policy=False,
+        infer_from_topology=False,
     ),
 }
 
@@ -263,12 +295,12 @@ def infer_accelerator(
         (
             a
             for a, cfg in ACCELERATOR_CONFIGS.items()
-            if len(dims) == cfg.topology_dims
+            if len(dims) == cfg.topology_dims and cfg.infer_from_topology
         ),
         None,
     )
 
-  resolved = {a for a in (explicit_acc, path_acc, topo_acc) if a}
+  resolved = {a for a in (explicit_acc, path_acc) if a}
   if len(resolved) > 1:
     raise ValueError(
         f"Conflicting TPU accelerators: accelerator={accelerator!r}"
@@ -276,7 +308,24 @@ def infer_accelerator(
         f" topology={topology!r} ({topo_acc})."
     )
   if resolved:
-    return resolved.pop()
+    acc = resolved.pop()
+    # Several accelerators share a dimensionality (v5e and v6e are both 2D),
+    # so the topology only has to be compatible with the resolved one.
+    # Dimensionalities no accelerator has are left to `compute_topology_info`.
+    known_dims = {cfg.topology_dims for cfg in ACCELERATOR_CONFIGS.values()}
+    if (
+        dims
+        and len(dims) in known_dims
+        and len(dims) != ACCELERATOR_CONFIGS[acc].topology_dims
+    ):
+      raise ValueError(
+          f"Conflicting TPU accelerators: accelerator={accelerator!r}"
+          f" ({explicit_acc}), config_path={config_path!r} ({path_acc}),"
+          f" topology={topology!r} ({topo_acc})."
+      )
+    return acc
+  if topo_acc:
+    return topo_acc
 
   raise ValueError(
       "Cannot infer TPU accelerator from config path"
@@ -324,7 +373,7 @@ def compute_topology_info(
       "total_cores": total_cores,
       "placement_policy": (
           f"{acc}-{total_cores}-{clean_topology}-placement-policy"
-          if num_nodes > 1
+          if num_nodes > 1 and acc_cfg.uses_placement_policy
           else None
       ),
   }
@@ -475,6 +524,7 @@ def add_workload_args(
       ("--priority", DEFAULT_PRIORITY, "Priority class"),
       ("--docker-image", DEFAULT_DOCKER_IMAGE, "Base TPU container image"),
       ("--gcs-bucket", DEFAULT_GCS_BUCKET, "GCS output bucket"),
+      ("--git-repo", DEFAULT_GIT_REPO, "Git repository cloned in the JobSet"),
       ("--git-branch", DEFAULT_GIT_BRANCH, "Git branch cloned in the JobSet"),
       (
           "--reservation-name",
@@ -485,6 +535,25 @@ def add_workload_args(
     parser.add_argument(
         flag, default=default, help=f"{help_text} (default: {default!r})."
     )
+  parser.add_argument(
+      "--runtimes",
+      default=None,
+      help=(
+          "Comma-separated runtimes each config runs on: 'mcjax' (one JAX"
+          " process per host) and/or Pathways runtimes 'louhi' and 'rapid'"
+          " (see automation/runtimes.py). Default: the suite's `runtimes:`"
+          " list, else mcjax."
+      ),
+  )
+  parser.add_argument(
+      "--max-parallel",
+      type=int,
+      default=None,
+      help=(
+          "Maximum JobSets in flight at once; the rest are submitted as"
+          " others finish (default: submit all at once)."
+      ),
+  )
   parser.add_argument(
       "--timeout-minutes",
       type=int,

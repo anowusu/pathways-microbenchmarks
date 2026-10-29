@@ -1,0 +1,25 @@
+# Canonical benchmark configurations for the TPUMS nightly comparison of
+# McJAX and Pathways on Cloud on GKE TPU v5e (one 4x8 slice: 8 hosts, 32 chips).
+#
+# Every config runs once per runtime listed under `runtimes:` (override with
+# --runtimes). `mcjax` runs one JAX process per host; `louhi` and `rapid` run
+# one JAX process in a Pathways head against the open-source and the internal
+# Pathways images respectively (see automation/runtimes.py).
+
+suite_name: canonical_v5e_runtimes
+description: Nightly McJAX vs Pathways (Louhi, Rapid) comparison on TPU v5e 4x8
+
+runtimes:
+  - mcjax
+  - louhi
+  - rapid
+
+configs:
+  # 4x8 collectives (8 hosts, 32 chips)
+  - configs/v5e/4x8/all_gather.yaml
+  - configs/v5e/4x8/all_reduce.yaml
+  - configs/v5e/4x8/all_to_all.yaml
+
+  # Per-chip compute and memory benchmarks on the same slice
+  - configs/v5e/4x8/gemm.yaml
+  - configs/v5e/4x8/hbm.yaml

@@ -1,0 +1,4 @@
+pyyaml
+kubernetes>=28,<32
+pathwaysutils>=0.1.13
+google-cloud-bigquery

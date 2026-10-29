@@ -24,11 +24,13 @@ import csv
 import datetime
 import io
 import itertools
+import json
 import logging
 import subprocess
 import sys
 from typing import Any, Optional
 
+from automation import runtimes as runtimes_lib
 from automation import utils
 
 
@@ -57,10 +59,21 @@ def verify_gcs_bucket_accessible(gcs_bucket: str) -> None:
     )
 
 
+# Runtime discriminator columns added to every row (see runtimes.py); the
+# provenance ones are only filled for Pathways runtimes.
+RUNTIME_COLUMNS: tuple[str, ...] = (
+    "runtime",
+    "pathways_server_image",
+    "pathways_proxy_image",
+    "pathways_server_digest",
+    "pathways_proxy_digest",
+    "git_commit",
+)
 # Cross-workload discriminator and metric columns placed before the remaining
 # raw summary.csv columns.
 CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
     "collectives": (
+        "runtime",
         "topology",
         "mesh_shape",
         "sharding_strategy",
@@ -73,6 +86,7 @@ CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
         "xprof_bandwidth_per_chip_gb_s",
     ),
     "hbm": (
+        "runtime",
         "benchmark",
         "dtype",
         "num_elements",
@@ -81,6 +95,7 @@ CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
         "xprof_bandwidth_per_device_gb_s",
     ),
     "host_device": (
+        "runtime",
         "benchmark",
         "dtype",
         "data_size_mib",
@@ -89,6 +104,7 @@ CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
         "xprof_bandwidth_per_device_gb_s",
     ),
     "device_to_device": (
+        "runtime",
         "benchmark",
         "dtype",
         "direction",
@@ -99,6 +115,7 @@ CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
         "xprof_bandwidth_per_device_gb_s",
     ),
     "gemm": (
+        "runtime",
         "benchmark",
         "in_dtype",
         "out_dtype",
@@ -173,23 +190,45 @@ def infer_category_from_path(gcs_or_file_path: str) -> Optional[str]:
 
 
 def normalize_row(
-    row: dict[str, Any], category: str, topology: Optional[str] = None
+    row: dict[str, Any],
+    category: str,
+    topology: Optional[str] = None,
+    runtime: Optional[str] = None,
+    provenance: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
   """Returns a copy of `row` ready for aggregation.
 
   Drops the internal `_source_path` key, fills in a missing collectives
-  `topology` from `topology`, and casts D2D device indices to int.
+  `topology` from `topology`, casts D2D device indices to int, and stamps the
+  runtime discriminator and provenance columns (`RUNTIME_COLUMNS`).
 
   Args:
     row: Raw summary.csv row.
     category: Report category of the row.
     topology: Result-level topology, if known.
+    runtime: Runtime the row was measured on (default McJAX).
+    provenance: The workload's provenance (images, digests, commit).
 
   Returns:
     The normalized row.
   """
   norm = dict(row)
   norm.pop("_source_path", None)
+  # Single-runtime pipelines (no runtime or provenance known) keep the plain
+  # summary.csv columns; runtime matrices stamp every row so the rows of one
+  # config on different runtimes stay distinguishable.
+  if runtime or provenance:
+    provenance = provenance or {}
+    stamped = {
+        "runtime": (
+            runtime or provenance.get("runtime") or runtimes_lib.MCJAX.name
+        )
+    }
+    for col in RUNTIME_COLUMNS[1:]:
+      value = provenance.get(col)
+      stamped[col] = "" if value is None else str(value)
+    # Runtime columns lead; summary.csv columns keep their order after them.
+    norm = {**stamped, **{k: v for k, v in norm.items() if k not in stamped}}
 
   if category == "collectives":
     if topology:
@@ -235,30 +274,73 @@ def fetch_gcs_raw_metrics(gcs_output_dir: str) -> list[dict[str, Any]]:
   return [dict(r, _source_path=m_file) for r in reader]
 
 
-def discover_and_fetch_gcs_results(
-    gcs_base: str, date_str: str
-) -> list[dict[str, Any]]:
-  """Discovers all workload summary.csv files on GCS in a single listing."""
-  target_prefix = utils.format_gcs_uri(gcs_base, date_str)
-  res = subprocess.run(
-      ["gcloud", "storage", "ls", f"{target_prefix}/*/{_SUMMARY_CSV}"],
+_PROVENANCE_JSON = "provenance.json"
+
+
+def fetch_gcs_provenance(gcs_output_dir: str) -> dict[str, Any]:
+  """Reads the provenance.json the submitter wrote next to a workload's results."""
+  target = utils.format_gcs_uri(gcs_output_dir, _PROVENANCE_JSON)
+  proc = subprocess.run(
+      ["gcloud", "storage", "cat", target],
       capture_output=True,
       text=True,
       check=False,
       stdin=subprocess.DEVNULL,
       timeout=utils.CLI_TIMEOUT_SECONDS,
   )
-  if res.returncode != 0:
-    # Also covers "matched no objects"; stderr tells it apart from auth errors.
-    logging.warning(
-        "Could not list %s/*/%s (gcloud exit %d): %s",
-        target_prefix,
-        _SUMMARY_CSV,
-        res.returncode,
-        (res.stderr or "").strip() or "<no stderr>",
+  if proc.returncode != 0 or not proc.stdout.strip():
+    return {}
+  try:
+    data = json.loads(proc.stdout)
+  except json.JSONDecodeError:
+    logging.warning("Ignoring malformed %s", target)
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def _list_summary_files(target_prefix: str) -> list[str]:
+  """Lists summary.csv files one level (`<workload>/`) and two levels
+  (`<runtime>/<config>/`) below `target_prefix`."""
+  found: list[str] = []
+  failures: list[str] = []
+  for pattern in (f"*/{_SUMMARY_CSV}", f"*/*/{_SUMMARY_CSV}"):
+    res = subprocess.run(
+        ["gcloud", "storage", "ls", f"{target_prefix}/{pattern}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        timeout=utils.CLI_TIMEOUT_SECONDS,
     )
-    return []
-  metric_files = res.stdout.split()
+    if res.returncode != 0:
+      # Also covers "matched no objects"; stderr tells it apart from auth
+      # errors.
+      failures.append(
+          f"Could not list {target_prefix}/{pattern} (gcloud exit"
+          f" {res.returncode}): {(res.stderr or '').strip() or '<no stderr>'}"
+      )
+      continue
+    found.extend(res.stdout.split())
+  # One layout matching is normal; neither matching deserves the details.
+  for failure in failures:
+    if found:
+      logging.info("%s", failure)
+    else:
+      logging.warning("%s", failure)
+  return list(dict.fromkeys(found))
+
+
+def discover_and_fetch_gcs_results(
+    gcs_base: str, date_str: str
+) -> list[dict[str, Any]]:
+  """Discovers all workload summary.csv files on GCS.
+
+  Supports both layouts: `<date>/<workload>/summary.csv` (one runtime) and
+  `<date>/<runtime>/<config>/summary.csv` (runtime matrix). The topology comes
+  from the path when it carries one, else from the rows' `topology` column.
+  """
+  target_prefix = utils.format_gcs_uri(gcs_base, date_str)
+  metric_files = _list_summary_files(target_prefix)
 
   if not metric_files:
     logging.warning("No metric files found on GCS under %s", target_prefix)
@@ -266,24 +348,34 @@ def discover_and_fetch_gcs_results(
 
   discovered = []
   for mf in metric_files:
-    wl_name = mf.split("/")[-2]
-    try:
-      topo = utils.extract_topology(wl_name, mf)
-    except ValueError as e:
-      logging.warning("Skipping metric file %s: %s", mf, e)
-      continue
-
+    parts = mf.split("/")
+    wl_name = parts[-2]
+    runtime = parts[-3] if parts[-3] in runtimes_lib.RUNTIMES else None
     gcs_artifact_path = mf.rsplit("/", 1)[0]
     metrics = fetch_gcs_raw_metrics(gcs_artifact_path)
-    if metrics:
-      discovered.append({
-          "workload_name": wl_name,
-          "config_name": wl_name,
-          "gcs_artifact_path": gcs_artifact_path,
-          "topology": topo,
-          "status": "SUCCESS",
-          "metrics": metrics,
-      })
+    if not metrics:
+      continue
+    try:
+      topo = utils.extract_topology(wl_name, mf)
+    except ValueError:
+      topo = str(metrics[0].get("topology") or "")
+      if not topo:
+        logging.warning("Skipping metric file %s: no topology found.", mf)
+        continue
+    provenance = fetch_gcs_provenance(gcs_artifact_path)
+    entry: dict[str, Any] = {
+        "workload_name": wl_name,
+        "config_name": wl_name,
+        "gcs_artifact_path": gcs_artifact_path,
+        "topology": topo,
+        "status": "SUCCESS",
+        "metrics": metrics,
+    }
+    runtime = runtime or provenance.get("runtime")
+    if runtime or provenance:
+      entry["runtime"] = runtime or runtimes_lib.MCJAX.name
+      entry["provenance"] = provenance
+    discovered.append(entry)
 
   logging.info(
       "Discovered %d workload metric file(s) on GCS containing %d total"
@@ -319,6 +411,8 @@ def aggregate_and_upload_category_results(
   for r in raw_results:
     metrics = r.get("metrics", [])
     topology = r.get("topology")
+    runtime = r.get("runtime")
+    provenance = r.get("provenance") or {}
 
     for row in metrics:
       # Set on every row by fetch_gcs_raw_metrics().
@@ -330,7 +424,13 @@ def aggregate_and_upload_category_results(
             source_path,
         )
         continue
-      norm_row = normalize_row(row, category=cat, topology=topology)
+      norm_row = normalize_row(
+          row,
+          category=cat,
+          topology=topology,
+          runtime=runtime,
+          provenance=provenance,
+      )
       categorized[cat].append(
           {k: norm_row[k] for k in ordered_columns(cat, [norm_row])}
       )

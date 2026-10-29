@@ -35,6 +35,7 @@ import sys
 from typing import Any, Optional
 
 from automation import metrics_aggregator
+from automation import runtime_comparison
 from automation import utils
 from automation import workload_submitter
 
@@ -67,6 +68,95 @@ CATEGORY_TITLES = {
         "Peer-to-peer inter-chip transfer bandwidth and latency",
     ),
 }
+
+
+def _has_runtime_matrix(
+    categorized_metrics: Optional[dict[str, list[dict[str, Any]]]],
+) -> bool:
+  """True if the aggregated rows carry a `runtime` column (runtime matrix)."""
+  if not categorized_metrics:
+    return False
+  return any(
+      "runtime" in row for rows in categorized_metrics.values() for row in rows
+  )
+
+
+def _runtime_sections_markdown(
+    categorized_metrics: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+  """Markdown for the runtime provenance and per-case comparison tables."""
+  lines: list[str] = []
+  provenance = runtime_comparison.runtime_provenance_summary(
+      categorized_metrics
+  )
+  if provenance:
+    headers = list(dict.fromkeys(k for row in provenance for k in row))
+    lines += ["## Runtimes", "", *_markdown_table(headers, provenance), ""]
+  tables = runtime_comparison.build_comparison(categorized_metrics)
+  if tables:
+    lines += [
+        "## Runtime Comparison (per benchmark case)",
+        "",
+        (
+            "*`vs_mcjax` is the step-time ratio to McJAX on the same case: XProf"
+            " device time when both runtimes have it, else wall clock."
+            " `xprof` says whether device timings were captured.*"
+        ),
+        "",
+    ]
+    for table in tables:
+      title, _ = CATEGORY_TITLES.get(
+          table.category, (table.category.capitalize(), "")
+      )
+      lines.append(f"### {title} — {', '.join(table.runtimes)}")
+      lines.append("")
+      lines.extend(_markdown_table(list(table.headers), table.rows))
+      lines.append("")
+  return lines
+
+
+def _runtime_sections_html(
+    categorized_metrics: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+  """HTML for the runtime provenance and per-case comparison tables."""
+  lines: list[str] = []
+  provenance = runtime_comparison.runtime_provenance_summary(
+      categorized_metrics
+  )
+  tables = runtime_comparison.build_comparison(categorized_metrics)
+  if not provenance and not tables:
+    return lines
+  lines.append('    <div class="section">')
+  lines.append(
+      '      <h2 class="section-title">⚖️ Runtime Comparison (McJAX vs'
+      " Pathways)</h2>"
+  )
+  if provenance:
+    headers = list(dict.fromkeys(k for row in provenance for k in row))
+    lines.append(
+        '      <h3 style="margin-top: 16px; margin-bottom: 6px; font-size:'
+        ' 16px;">Runtimes</h3>'
+    )
+    lines.extend(_html_table(headers, provenance, " " * 6))
+  if tables:
+    lines.append(
+        '      <p class="desc-text">vs_mcjax is the step-time ratio to McJAX'
+        " on the same case: XProf device time when both runtimes have it,"
+        " else wall clock. xprof says whether device timings were"
+        " captured.</p>"
+    )
+    for table in tables:
+      title, _ = CATEGORY_TITLES.get(
+          table.category, (table.category.capitalize(), "")
+      )
+      lines.append(
+          '      <h3 style="margin-top: 24px; margin-bottom: 6px; font-size:'
+          f' 16px;">{html.escape(title)} — '
+          f'{html.escape(", ".join(table.runtimes))}</h3>'
+      )
+      lines.extend(_html_table(list(table.headers), table.rows, " " * 6))
+  lines.append("    </div>")
+  return lines
 
 
 def count_statuses(
@@ -509,6 +599,8 @@ def format_consolidated_report(
     lines.append("**Environment:** " + " | ".join(env_items))
   if lines:
     lines.append("")
+  if _has_runtime_matrix(categorized_metrics):
+    lines.extend(_runtime_sections_markdown(categorized_metrics))
   lines.extend([
       "## Aggregated Benchmark Results by Category",
       "",
@@ -798,6 +890,9 @@ def generate_html_report(
       ),
       "    </div>",
   ])
+
+  if _has_runtime_matrix(categorized_metrics):
+    html_lines.extend(_runtime_sections_html(categorized_metrics))
 
   if categorized_metrics and any(categorized_metrics.values()):
     html_lines.append('    <div class="section">')

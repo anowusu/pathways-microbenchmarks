@@ -30,15 +30,92 @@ from collections.abc import Sequence
 import dataclasses
 import datetime
 import logging
+import os
+import subprocess
 import sys
-from typing import Optional
+from typing import Any, Optional
 
+from automation import bq_writer
 from automation import metrics_aggregator
 from automation import report_generator
+from automation import runtimes as runtimes_lib
 from automation import utils
 from automation import workload_submitter
 
 DEFAULT_CLEANUP = True
+# Dated and rolling copies of the HTML/Markdown report, under the bucket.
+REPORTS_SUBDIR = "reports"
+
+
+def publish_report_copies(
+    gcs_bucket: str, date_str: str, output_report: str
+) -> None:
+  """Copies the night's reports to `<bucket>/reports/<date>.*` and `latest.*`.
+
+  The per-date `consolidated_report.*` written by the report generator stays
+  where it is; these copies give one stable URL for the newest report.
+  """
+  html_path = os.path.splitext(output_report)[0] + ".html"
+  for local_path, ext in ((output_report, "md"), (html_path, "html")):
+    if not os.path.exists(local_path):
+      continue
+    for name in (f"{date_str}.{ext}", f"latest.{ext}"):
+      target = utils.format_gcs_uri(gcs_bucket, REPORTS_SUBDIR, name)
+      proc = subprocess.run(
+          ["gcloud", "storage", "cp", local_path, target],
+          capture_output=True,
+          text=True,
+          check=False,
+          stdin=subprocess.DEVNULL,
+          timeout=utils.CLI_TIMEOUT_SECONDS,
+      )
+      if proc.returncode == 0:
+        logging.info("Published %s", target)
+      else:
+        logging.error(
+            "Failed to publish %s (gcloud exit %d): %s",
+            target,
+            proc.returncode,
+            (proc.stderr or "").strip(),
+        )
+
+
+def write_bigquery(
+    bq_table: str,
+    results: Sequence[workload_submitter.BenchmarkResult],
+    categorized_metrics: dict[str, list[dict[str, Any]]],
+    *,
+    date_str: str,
+    started_at: datetime.datetime,
+    accelerator: str,
+    docker_image: str,
+    region: str,
+    cluster: str,
+) -> int:
+  """Writes the night's aggregated rows to BigQuery; failures are logged."""
+  artifacts_by_key: dict[tuple[str, str], str] = {}
+  for r in results:
+    for row in r.metrics:
+      artifacts_by_key[(r.runtime, str(row.get("benchmark")))] = (
+          r.gcs_artifact_path
+      )
+  records = bq_writer.build_records(
+      categorized_metrics,
+      artifacts_by_key,
+      date_str=date_str,
+      started_at=started_at,
+      accelerator=accelerator,
+      container_image=docker_image,
+      region=region,
+      cluster=cluster,
+  )
+  try:
+    return bq_writer.write_records(bq_table, records)
+  except Exception:  # pylint: disable=broad-exception-caught
+    # The GCS report is the primary output; a BigQuery outage must not fail
+    # the night.
+    logging.exception("Writing %d row(s) to %s failed.", len(records), bq_table)
+    return 0
 
 
 def _default_output_report(
@@ -79,6 +156,11 @@ def run_pipeline(
     libtpu_version: Optional[str] = None,
     reservation_name: Optional[str] = utils.DEFAULT_RESERVATION_NAME,
     accelerator: Optional[str] = None,
+    git_repo: str = utils.DEFAULT_GIT_REPO,
+    runtimes: Optional[Sequence[runtimes_lib.Runtime]] = None,
+    bq_table: Optional[str] = None,
+    max_parallel: Optional[int] = None,
+    skip_cluster_credentials: bool = False,
 ) -> list[workload_submitter.BenchmarkResult]:
   """Executes the benchmark automation pipeline (Workload Submission, Metrics Aggregation, Report Generation)."""
   # Resolve the selection first so flag misuse fails before any GCS or
@@ -96,6 +178,8 @@ def run_pipeline(
         "No YAML configuration files found matching selection criteria."
     )
   acc = workload_submitter.infer_configs_accelerator(config_files, accelerator)
+  if runtimes is None:
+    runtimes = workload_submitter.resolve_runtimes(None, suite_file)
 
   if not dry_run and gcs_bucket:
     metrics_aggregator.verify_gcs_bucket_accessible(gcs_bucket)
@@ -117,21 +201,29 @@ def run_pipeline(
   if reservation_name:
     logging.info("Reservation Name : %s", reservation_name)
   logging.info("Docker Image     : %s", docker_image)
+  logging.info("Runtimes         : %s", ", ".join(r.name for r in runtimes))
+  logging.info("Git Repo / Branch: %s @ %s", git_repo, git_branch)
   logging.info("GCS Bucket       : %s", gcs_bucket)
+  if bq_table:
+    logging.info("BigQuery Table   : %s", bq_table)
   logging.info("Report Output    : %s", output_report)
   logging.info("=" * 80)
   logging.info(
       "Resolved %d benchmark config(s) for execution...", len(config_files)
   )
 
-  # Fetch cluster credentials first
-  workload_submitter.fetch_cluster_credentials(
-      cluster=cluster,
-      project=project,
-      region=region,
-      zone=zone,
-      dry_run=dry_run,
-  )
+  # Fetch cluster credentials first, unless kubectl is already configured
+  # (e.g. the in-cluster service account of the nightly CronJob).
+  if skip_cluster_credentials:
+    logging.info("Using the existing kubectl configuration for %s.", cluster)
+  else:
+    workload_submitter.fetch_cluster_credentials(
+        cluster=cluster,
+        project=project,
+        region=region,
+        zone=zone,
+        dry_run=dry_run,
+    )
 
   # ----------------------------------------------------------------------------
   # Workload Submitter: Submit workloads, poll status, cleanup
@@ -152,6 +244,9 @@ def run_pipeline(
       dry_run=dry_run,
       reservation_name=reservation_name,
       accelerator=acc,
+      git_repo=git_repo,
+      runtimes=runtimes,
+      max_parallel=max_parallel,
   )
 
   # Ingest summary.csv metrics; a JobSet that exited 0 without producing any
@@ -215,6 +310,22 @@ def run_pipeline(
       libtpu_version=libtpu_version,
   )
 
+  if not dry_run and gcs_bucket:
+    publish_report_copies(gcs_bucket, date_str, output_report)
+
+  if bq_table and not dry_run:
+    write_bigquery(
+        bq_table,
+        results,
+        categorized_metrics,
+        date_str=date_str,
+        started_at=now_utc,
+        accelerator=acc or "",
+        docker_image=docker_image,
+        region=region,
+        cluster=cluster,
+    )
+
   logging.info("=" * 80)
   logging.info(
       "Daily Pipeline Execution Finished. Report saved to %s", output_report
@@ -251,6 +362,23 @@ def main(argv: Sequence[str]) -> None:
       "--jax-version", default=None, help="JAX runtime version."
   )
   parser.add_argument("--libtpu-version", default=None, help="libtpu version.")
+  parser.add_argument(
+      "--skip-cluster-credentials",
+      action="store_true",
+      default=bool(os.environ.get("SKIP_CLUSTER_CREDENTIALS")),
+      help=(
+          "Do not run `gcloud container clusters get-credentials`; use the"
+          " kubectl configuration already in place (in-cluster CronJob)."
+      ),
+  )
+  parser.add_argument(
+      "--bq-table",
+      default=os.environ.get("BQ_TABLE"),
+      help=(
+          "BigQuery table (project.dataset.table) that receives one row per"
+          " benchmark case in uBench's microbenchmark schema (default: none)."
+      ),
+  )
 
   args = parser.parse_args(argv[1:])
   utils.validate_workload_args(args, require_cluster=True)
@@ -289,6 +417,13 @@ def main(argv: Sequence[str]) -> None:
       libtpu_version=args.libtpu_version,
       reservation_name=args.reservation_name,
       accelerator=args.accelerator,
+      git_repo=args.git_repo,
+      runtimes=workload_submitter.resolve_runtimes(
+          args.runtimes, args.suite_file
+      ),
+      bq_table=args.bq_table,
+      max_parallel=args.max_parallel,
+      skip_cluster_credentials=args.skip_cluster_credentials,
   )
 
 

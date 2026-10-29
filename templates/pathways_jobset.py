@@ -23,6 +23,7 @@ JAX 0.12.0 at the time of writing) run the same way, with
 
 import argparse
 import pathlib
+from typing import Any, Optional
 
 from pathwaysutils.experimental.gke import jobset
 import yaml
@@ -35,13 +36,17 @@ _PROXY_IMAGE = jobset.DEFAULT_PATHWAYS_PROXY_IMAGE
 # Same client image as gke_job_template.yaml. `pip install` pins the JAX version
 # of pyproject.toml, which the Pathways image tag has to match.
 _IMAGE = "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
+# Results (summary.csv, detailed.json, git_commit.txt, execution.log) go to
+# $GCS_RESULTS_DIR, the XProf traces the Pathways workers write to
+# $GCS_XPROF_DIR; both default to <gcs_dir>/results and <gcs_dir>/xprof.
 _RUN = """set -o pipefail
 git clone --depth 1 --branch "$TPUMS_REF" "$TPUMS_REPO" /tmp/tpums
 cd /tmp/tpums && pip install -q -e '.[pathways]' && mkdir -p /tmp/results
+git rev-parse HEAD > /tmp/results/git_commit.txt
 tpums benchmark run-config "$TPUMS_CONFIG" --output_dir=/tmp/results \\
-    --xprof_dir="$GCS_DIR/xprof" 2>&1 | tee /tmp/results/execution.log
+    --xprof_dir="$GCS_XPROF_DIR" 2>&1 | tee /tmp/results/execution.log
 rc=$?
-gcloud storage cp /tmp/results/* "$GCS_DIR/results/"
+gcloud storage cp /tmp/results/* "$GCS_RESULTS_DIR/"
 exit $rc
 """
 
@@ -66,46 +71,124 @@ def _parse_args() -> argparse.Namespace:
   return parser.parse_args()
 
 
-def build_jobset(args: argparse.Namespace) -> jobset.PathwaysJobSet:
-  """Builds the Pathways JobSet that runs `args.config`."""
-  config = yaml.safe_load((_REPO_ROOT / args.config).read_text())
+def benchmark_op_flags(config_path: str) -> tuple[list[str], dict[str, str]]:
+  """Returns the op_flags.yaml flags and env of the benchmark in `config_path`.
+
+  Args:
+    config_path: TPUMS config, relative to the repository root.
+  """
+  config = yaml.safe_load((_REPO_ROOT / config_path).read_text())
   op_flags = yaml.safe_load(_OP_FLAGS.read_text())
   op_flags = op_flags.get(config["benchmark"]["name"]) or {}
   flags = [str(flag) for flag in op_flags.get("flags") or []]
   env = {key: str(value) for key, value in (op_flags.get("env") or {}).items()}
+  return flags, env
+
+
+def build_pathways_jobset(
+    name: str,
+    config: str,
+    gcs_dir: str,
+    *,
+    tpu_type: str = "v5e",
+    topology: str = "4x8",
+    pathways_version: str = "latest",
+    pathways_server_image: str = _SERVER_IMAGE,
+    pathways_proxy_image: str = _PROXY_IMAGE,
+    queue: str = "",
+    repo: str = _REPO_URL,
+    ref: str = "main",
+    image: str = _IMAGE,
+    namespace: str = "default",
+    results_dir: Optional[str] = None,
+    xprof_dir: Optional[str] = None,
+    extra_labels: Optional[dict[str, str]] = None,
+    extra_env: Optional[dict[str, str]] = None,
+) -> jobset.PathwaysJobSet:
+  """Builds the Pathways JobSet that runs one TPUMS config.
+
+  Args:
+    name: JobSet name (at most 22 characters).
+    config: TPUMS config, relative to the repository root.
+    gcs_dir: `gs://` directory of the run; Pathways scratch goes to
+      `<gcs_dir>/pathways`.
+    tpu_type: Pathways TPU type, e.g. `v5e`.
+    topology: Slice topology, e.g. `4x8`.
+    pathways_version: Tag of both Pathways images.
+    pathways_server_image: Resource manager / worker image, without tag.
+    pathways_proxy_image: Proxy image, without tag.
+    queue: Kueue LocalQueue label, or "" for none.
+    repo: Repository the head container clones.
+    ref: Branch or tag of `repo` to run.
+    image: Client image; `pip install` upgrades its JAX to pyproject's pin.
+    namespace: Kubernetes namespace.
+    results_dir: Where summary.csv, detailed.json, git_commit.txt and
+      execution.log go (default `<gcs_dir>/results`).
+    xprof_dir: Where the workers write XProf traces (default
+      `<gcs_dir>/xprof`); must be a `gs://` path the workers can reach.
+    extra_labels: Additional JobSet labels, e.g. a Kueue priority class.
+    extra_env: Additional environment variables of the client container.
+
+  Returns:
+    The JobSet, ready for `export_yaml()` or `apply()`.
+  """
+  flags, env = benchmark_op_flags(config)
   # McJAX applies op_flags.yaml to the benchmark process through
   # LIBTPU_INIT_ARGS. On Pathways the proxy compiles and the workers execute,
   # so both take the flags on their command line (the open-source binaries
   # forward --xla_* and --megascale_* flags to libtpu).
-  worker_kwargs = {}
+  worker_kwargs: dict[str, Any] = {}
   if flags:
     worker_kwargs["args"] = flags
   if env:
     worker_kwargs["env"] = env
+  labels = dict(extra_labels or {})
+  if queue:
+    labels["kueue.x-k8s.io/queue-name"] = queue
   pathways_jobset = jobset.PathwaysJobSet(
-      name=args.name,
-      namespace="default",
-      pathways_dir=f"{args.gcs_dir}/pathways",
-      tpu_type=args.tpu_type,
-      topology=args.topology,
+      name=name,
+      namespace=namespace,
+      pathways_dir=f"{gcs_dir}/pathways",
+      tpu_type=tpu_type,
+      topology=topology,
       num_slices=1,
-      pathways_version=args.pathways_version,
-      pathways_rm_and_worker_image=args.pathways_server_image,
-      pathways_proxy_image=args.pathways_proxy_image,
-      labels={"kueue.x-k8s.io/queue-name": args.queue} if args.queue else None,
+      pathways_version=pathways_version,
+      pathways_rm_and_worker_image=pathways_server_image,
+      pathways_proxy_image=pathways_proxy_image,
+      labels=labels or None,
       proxy_container_kwargs={"args": flags} if flags else None,
       worker_container_kwargs=worker_kwargs or None,
   )
   return pathways_jobset.add_user_workload(
-      image=_IMAGE,
+      image=image,
       command=["bash", "-c", _RUN],
       env={
-          "TPUMS_REPO": args.repo,
-          "TPUMS_REF": args.ref,
-          "TPUMS_CONFIG": args.config,
-          "GCS_DIR": args.gcs_dir,
+          "TPUMS_REPO": repo,
+          "TPUMS_REF": ref,
+          "TPUMS_CONFIG": config,
+          "GCS_DIR": gcs_dir,
+          "GCS_RESULTS_DIR": results_dir or f"{gcs_dir}/results",
+          "GCS_XPROF_DIR": xprof_dir or f"{gcs_dir}/xprof",
           "PYTHONUNBUFFERED": "1",
+          **(extra_env or {}),
       },
+  )
+
+
+def build_jobset(args: argparse.Namespace) -> jobset.PathwaysJobSet:
+  """Builds the Pathways JobSet that runs `args.config`."""
+  return build_pathways_jobset(
+      name=args.name,
+      config=args.config,
+      gcs_dir=args.gcs_dir,
+      tpu_type=args.tpu_type,
+      topology=args.topology,
+      pathways_version=args.pathways_version,
+      pathways_server_image=args.pathways_server_image,
+      pathways_proxy_image=args.pathways_proxy_image,
+      queue=args.queue,
+      repo=args.repo,
+      ref=args.ref,
   )
 
 

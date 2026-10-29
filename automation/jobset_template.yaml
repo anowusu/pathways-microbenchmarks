@@ -139,7 +139,7 @@ spec:
                       printenv
 
                       echo "=== Cloning accelerator-microbenchmarks repository (branch: ${GIT_BRANCH}) ==="
-                      git clone --branch "${GIT_BRANCH}" --single-branch https://github.com/AI-Hypercomputer/accelerator-microbenchmarks.git /tmp/tpums_repo
+                      git clone --branch "${GIT_BRANCH}" --single-branch "${GIT_REPO}" /tmp/tpums_repo
                       cd /tmp/tpums_repo
                       mkdir -p /tmp/results
                       git rev-parse HEAD > /tmp/results/git_commit.txt 2>/dev/null || true

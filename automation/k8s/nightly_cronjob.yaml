@@ -1,0 +1,102 @@
+# TPUMS nightly runtime comparison: McJAX vs Pathways (Louhi, Rapid) on
+# TPU v5e 4x8, driven from inside the cluster by a CronJob.
+#
+#   kubectl apply -f automation/k8s/nightly_cronjob.yaml
+#   kubectl create job --from=cronjob/tpums-nightly tpums-nightly-manual   # run now
+#
+# The KSA is bound to the GSA tpums-nightly@cloud-tpu-multipod-dev through
+# Workload Identity (GCS bucket + BigQuery dataset writes); the Role lets the
+# driver create and watch JobSets in this namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tpums-nightly
+  namespace: default
+  annotations:
+    iam.gke.io/gcp-service-account: tpums-nightly@cloud-tpu-multipod-dev.iam.gserviceaccount.com
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tpums-nightly
+  namespace: default
+rules:
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tpums-nightly
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: tpums-nightly
+    namespace: default
+roleRef:
+  kind: Role
+  name: tpums-nightly
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tpums-nightly
+  namespace: default
+spec:
+  # 09:00 UTC = 02:00 PDT / 01:00 PST.
+  schedule: "0 9 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      # 15 JobSets, at most 3 in flight, 25 min each: well under 5 h.
+      activeDeadlineSeconds: 18000
+      template:
+        metadata:
+          labels:
+            app: tpums-nightly
+        spec:
+          serviceAccountName: tpums-nightly
+          restartPolicy: Never
+          nodeSelector:
+            cloud.google.com/gke-nodepool: default-pool
+          containers:
+            - name: driver
+              image: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:latest
+              imagePullPolicy: Always
+              args:
+                - --cluster=pw-scale-test-v5e-32
+                - --project=cloud-tpu-multipod-dev
+                - --region=us-south1
+                - --zone=us-south1-a
+                - --namespace=default
+                - --queue=multislice-queue
+                - --priority=medium
+                - --suite-file=automation/canonical_suite_v5e.yaml
+                - --runtimes=mcjax,louhi,rapid
+                - --max-parallel=3
+                - --timeout-minutes=25
+                - --git-repo=https://github.com/anowusu/pathways-microbenchmarks.git
+                - --git-branch=nightly
+                - --docker-image=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+                - --gcs-bucket=gs://cloud-pathways-staging/tpums-nightly
+                - --bq-table=cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks
+                - --skip-cluster-credentials
+                - --cleanup
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  memory: 4Gi

@@ -30,6 +30,7 @@ import sys
 import time
 from typing import Any, Optional
 
+from automation import runtimes as runtimes_lib
 from automation import utils
 import yaml
 
@@ -159,6 +160,10 @@ class BenchmarkResult:
   gcs_artifact_path: str
   metrics: list[dict[str, Any]] = dataclasses.field(default_factory=list)
   error_message: Optional[str] = None
+  # Runtime the config ran on (see automation/runtimes.py) and what
+  # identifies its build: images, digests, repository commit.
+  runtime: str = runtimes_lib.MCJAX.name
+  provenance: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -185,6 +190,12 @@ class ActiveWorkload:
   error_message: Optional[str] = None
   terminal: bool = False
   cleaned_up: bool = False
+  runtime: str = runtimes_lib.MCJAX.name
+  provenance: dict[str, Any] = dataclasses.field(default_factory=dict)
+  # Pathways JobSets carry a fixed `metadata.name` (pathwaysutils derives
+  # nothing from it, but their names must stay short); McJAX JobSets use
+  # `generateName`.
+  fixed_name: bool = False
 
 
 def _package_relative_path(config_file: pathlib.Path) -> str:
@@ -394,6 +405,102 @@ def sanitize_workload_name(
   return full_name[:max_len].rstrip("-")
 
 
+# Pathways JobSet names stay within gcluster's and uBench's 22-character limit
+# so the derived pod and service names fit Kubernetes' 63-character labels.
+PATHWAYS_WORKLOAD_NAME_MAX_LEN = 22
+
+
+def runtime_workload_name(
+    runtime: runtimes_lib.Runtime, config_name: str, topology: str
+) -> str:
+  """Returns the JobSet name of `config_name` on `runtime`.
+
+  McJAX names follow `sanitize_workload_name` (`tpums-<topology>-<runtime>-
+  <config>`, completed by `generateName`). Pathways names are
+  `tpums-<runtime>-<config>` truncated to `PATHWAYS_WORKLOAD_NAME_MAX_LEN`.
+
+  Args:
+    runtime: The runtime.
+    config_name: Config file stem, e.g. `all_gather`.
+    topology: Slice topology, e.g. `4x8`.
+  """
+  if not runtime.is_pathways:
+    return sanitize_workload_name(f"{runtime.name}-{config_name}", topology)
+  clean = re.sub(r"[^a-z0-9-]", "-", f"{runtime.name}-{config_name}".lower())
+  name = re.sub(r"-+", "-", f"tpums-{clean}").strip("-")
+  return name[:PATHWAYS_WORKLOAD_NAME_MAX_LEN].rstrip("-")
+
+
+def generate_pathways_manifest(
+    workload_name: str,
+    namespace: str,
+    queue_name: str,
+    priority_class: str,
+    topology: str,
+    docker_image: str,
+    config_rel_path: str,
+    gcs_output_dir: str,
+    runtime: runtimes_lib.Runtime,
+    git_repo: str = utils.DEFAULT_GIT_REPO,
+    git_branch: str = utils.DEFAULT_GIT_BRANCH,
+    accelerator: Optional[str] = None,
+) -> str:
+  """Generates the Pathways JobSet manifest of one config on a Pathways runtime.
+
+  Built with `templates/pathways_jobset.py` on pathwaysutils' `PathwaysJobSet`:
+  one client in the Pathways head drives the slice through the proxy, the
+  benchmark's op_flags.yaml entry goes on the proxy and worker command lines,
+  and results land directly in `gcs_output_dir` like a McJAX JobSet's.
+
+  Args:
+    workload_name: JobSet name (at most 22 characters).
+    namespace: Target namespace.
+    queue_name: Kueue LocalQueue.
+    priority_class: Kueue priority class label.
+    topology: Slice topology, e.g. `4x8`.
+    docker_image: Client image.
+    config_rel_path: Config path relative to the package root.
+    gcs_output_dir: `gs://` directory that receives summary.csv etc.
+    runtime: A Pathways runtime (images and tag).
+    git_repo: Repository the client clones.
+    git_branch: Branch or tag it checks out.
+    accelerator: Accelerator family (`v5e`, `v6e`, `tpu7x`); inferred from
+      the config path if None.
+
+  Returns:
+    The JobSet manifest YAML.
+  """
+  # Imported lazily: McJAX-only runs do not need pathwaysutils installed.
+  from templates import pathways_jobset  # pylint: disable=g-import-not-at-top
+
+  acc = utils.infer_accelerator(
+      accelerator, config_path=config_rel_path, topology=topology
+  )
+  pathways_jobset_obj = pathways_jobset.build_pathways_jobset(
+      name=workload_name,
+      config=config_rel_path,
+      gcs_dir=gcs_output_dir,
+      tpu_type=acc,
+      topology=topology,
+      pathways_version=runtime.pathways_version,
+      pathways_server_image=runtime.pathways_server_image,
+      pathways_proxy_image=runtime.pathways_proxy_image,
+      queue=queue_name,
+      repo=git_repo,
+      ref=git_branch,
+      image=docker_image,
+      namespace=namespace,
+      results_dir=gcs_output_dir,
+      xprof_dir=f"{gcs_output_dir}/xprof",
+      extra_labels=(
+          {"kueue.x-k8s.io/priority-class": priority_class}
+          if priority_class
+          else None
+      ),
+  )
+  return yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
+
+
 def generate_jobset_manifest(
     workload_name: str,
     namespace: str,
@@ -410,6 +517,7 @@ def generate_jobset_manifest(
     reservation_name: Optional[str] = utils.DEFAULT_RESERVATION_NAME,
     accelerator: Optional[str] = None,
     topo_info: Optional[dict[str, Any]] = None,
+    git_repo: str = utils.DEFAULT_GIT_REPO,
 ) -> str:
   """Generates a native GKE JobSet manifest using automation/jobset_template.yaml."""
   if topo_info is None:
@@ -444,6 +552,7 @@ def generate_jobset_manifest(
       "${PARALLELISM}": str(num_nodes),
       "${COMPLETIONS}": str(num_nodes),
       "${CONFIG_PATH}": config_rel_path,
+      "${GIT_REPO}": git_repo,
       "${GIT_BRANCH}": git_branch,
       "${GCS_OUTPUT_DIR}": gcs_output_dir,
       "${DECLARED_DURATION}": str(declared_duration_minutes),
@@ -485,6 +594,21 @@ def generate_jobset_manifest(
     )
 
   return manifest
+
+
+def load_suite_runtimes(suite_path: str) -> list[str]:
+  """Returns the suite's optional `runtimes:` list (empty if absent)."""
+  with open(suite_path, "r", encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+  if not isinstance(data, dict):
+    return []
+  value = data.get("runtimes") or []
+  if not isinstance(value, list):
+    raise ValueError(
+        f"Suite YAML file {suite_path}: 'runtimes' must be a list of runtime"
+        " names."
+    )
+  return [str(item) for item in value if item]
 
 
 def apply_jobset(manifest_yaml: str) -> str:
@@ -567,6 +691,65 @@ def delete_jobset(workload_name: str, namespace: str) -> bool:
     )
     return False
   return True
+
+
+def _delete_existing_jobset(
+    workload_name: str, namespace: str, wait_seconds: int = 120
+) -> None:
+  """Deletes a JobSet of that name if present and waits until it is gone."""
+  proc = subprocess.run(
+      [
+          "kubectl",
+          "delete",
+          "jobset",
+          workload_name,
+          "-n",
+          namespace,
+          "--ignore-not-found",
+          "--wait=true",
+          f"--timeout={wait_seconds}s",
+      ],
+      capture_output=True,
+      text=True,
+      check=False,
+      stdin=subprocess.DEVNULL,
+      timeout=wait_seconds + utils.CLI_TIMEOUT_SECONDS,
+  )
+  if proc.returncode != 0:
+    raise RuntimeError(
+        f"Could not delete the existing JobSet {workload_name}:"
+        f" {(proc.stderr or '').strip()}"
+    )
+  if "deleted" in proc.stdout:
+    logging.warning(
+        "Deleted a leftover JobSet %s before re-creating it.", workload_name
+    )
+
+
+PROVENANCE_FILE = "provenance.json"
+
+
+def upload_provenance(gcs_output_dir: str, provenance: dict[str, Any]) -> None:
+  """Writes `provenance.json` next to a workload's results; failures are logged."""
+  if not gcs_output_dir or not provenance:
+    return
+  target = utils.format_gcs_uri(gcs_output_dir, PROVENANCE_FILE)
+  try:
+    proc = subprocess.run(
+        ["gcloud", "storage", "cp", "-", target],
+        input=json.dumps(provenance, indent=2, sort_keys=True),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=utils.CLI_TIMEOUT_SECONDS,
+    )
+  except subprocess.TimeoutExpired:
+    logging.warning("Timed out uploading %s.", target)
+    return
+  if proc.returncode != 0:
+    logging.warning(
+        "Could not upload %s: %s", target, (proc.stderr or "").strip()
+    )
 
 
 def _kubectl_get_items(resource: str, namespace: str) -> list[dict[str, Any]]:
@@ -875,11 +1058,43 @@ class WorkloadManager:
   dry_run: bool = False
   reservation_name: Optional[str] = utils.DEFAULT_RESERVATION_NAME
   accelerator: Optional[str] = None
+  git_repo: str = utils.DEFAULT_GIT_REPO
+  runtimes: list[runtimes_lib.Runtime] = dataclasses.field(
+      default_factory=lambda: [runtimes_lib.MCJAX]
+  )
+  # At most this many JobSets are submitted at a time (None: all at once);
+  # the rest wait in `pending_workloads` and are submitted as others finish.
+  max_parallel: Optional[int] = None
 
   active_workloads: dict[str, ActiveWorkload] = dataclasses.field(
       default_factory=dict
   )
+  pending_workloads: dict[str, ActiveWorkload] = dataclasses.field(
+      default_factory=dict
+  )
   start_time: float = dataclasses.field(default_factory=time.time)
+  provenance_by_runtime: dict[str, dict[str, Any]] = dataclasses.field(
+      default_factory=dict
+  )
+
+  def _provenance(self, runtime: runtimes_lib.Runtime) -> dict[str, Any]:
+    """Resolves (once per runtime) the images and commit a runtime runs."""
+    if runtime.name not in self.provenance_by_runtime:
+      if self.dry_run:
+        prov: dict[str, Any] = {
+            "runtime": runtime.name,
+            "git_repo": self.git_repo,
+            "git_branch": self.git_branch,
+            "git_commit": None,
+        }
+        for role, ref in runtime.image_refs().items():
+          prov[f"pathways_{role}_image"] = ref
+      else:
+        prov = runtimes_lib.runtime_provenance(
+            runtime, self.git_repo, self.git_branch
+        )
+      self.provenance_by_runtime[runtime.name] = prov
+    return self.provenance_by_runtime[runtime.name]
 
   def prepare_workloads(
       self, config_files: list[pathlib.Path]
@@ -889,110 +1104,172 @@ class WorkloadManager:
     dry_run_results: list[BenchmarkResult] = []
     # Workload name -> config, including dry-run configs never registered.
     prepared: dict[str, str] = {
-        name: wl.config_rel_path for name, wl in self.active_workloads.items()
+        name: wl.config_rel_path
+        for name, wl in {
+            **self.pending_workloads,
+            **self.active_workloads,
+        }.items()
     }
 
-    for config_file in config_files:
-      config_name = config_file.stem
-      rel_path = _package_relative_path(config_file)
-      if os.path.isabs(rel_path):
-        raise ValueError(
-            f"Config {config_file} is outside {utils.PACKAGE_ROOT}. JobSets run"
-            " configs from the GitHub checkout of --git-branch, so only configs"
-            " inside the package (and exported to GitHub) can be submitted."
+    for runtime in self.runtimes:
+      provenance = self._provenance(runtime)
+      for config_file in config_files:
+        config_name = config_file.stem
+        rel_path = _package_relative_path(config_file)
+        if os.path.isabs(rel_path):
+          raise ValueError(
+              f"Config {config_file} is outside {utils.PACKAGE_ROOT}. JobSets"
+              " run configs from the GitHub checkout of --git-branch, so only"
+              " configs inside the package (and exported to GitHub) can be"
+              " submitted."
+          )
+        topology = infer_topology_from_config(rel_path)
+        workload_name = runtime_workload_name(runtime, config_name, topology)
+        if workload_name in prepared:
+          raise ValueError(
+              f"Duplicate sanitized workload name {workload_name!r} for config"
+              f" {config_file} on {runtime.name} (collides with"
+              f" {prepared[workload_name]!r})."
+          )
+        prepared[workload_name] = rel_path
+        # One directory per runtime and config, so the same config on two
+        # runtimes never shares a summary.csv.
+        gcs_output_dir = utils.format_gcs_uri(
+            self.gcs_bucket, date_str, runtime.name, config_name
         )
-      topology = infer_topology_from_config(rel_path)
-      workload_name = sanitize_workload_name(config_name, topology=topology)
-      if workload_name in prepared:
-        raise ValueError(
-            f"Duplicate sanitized workload name {workload_name!r} for config"
-            f" {config_file} (collides with {prepared[workload_name]!r})."
-        )
-      prepared[workload_name] = rel_path
-      gcs_output_dir = utils.format_gcs_uri(
-          self.gcs_bucket, date_str, workload_name
-      )
 
-      # Validates self.accelerator against the config path and topology.
-      acc = utils.infer_accelerator(
-          self.accelerator, config_path=rel_path, topology=topology
-      )
-      topo_info = utils.compute_topology_info(topology, accelerator=acc)
-      manifest = generate_jobset_manifest(
-          workload_name=workload_name,
-          namespace=self.namespace,
-          queue_name=self.queue,
-          priority_class=self.priority,
-          topology=topology,
-          docker_image=self.docker_image,
-          config_rel_path=rel_path,
-          gcs_output_dir=gcs_output_dir,
-          declared_duration_minutes=self.declared_duration_minutes,
-          template_path=self.template_path,
-          upload_trace=self.upload_trace,
-          git_branch=self.git_branch,
-          reservation_name=self.reservation_name,
-          accelerator=acc,
-          topo_info=topo_info,
-      )
-
-      if self.dry_run:
-        print(
-            "\n[Dry-Run: Workload Submitter - JobSet Manifest for"
-            f" '{config_name}' ({topology})]"
+        # Validates self.accelerator against the config path and topology.
+        acc = utils.infer_accelerator(
+            self.accelerator, config_path=rel_path, topology=topology
         )
-        print(manifest)
-        dry_run_results.append(
-            BenchmarkResult(
-                workload_name=workload_name,
-                config_name=config_name,
-                config_rel_path=rel_path,
-                topology=topology,
-                status="DRY_RUN",
-                duration_seconds=0.0,
-                gcs_artifact_path=gcs_output_dir,
-            )
-        )
-        continue
+        topo_info = utils.compute_topology_info(topology, accelerator=acc)
+        if runtime.is_pathways:
+          manifest = generate_pathways_manifest(
+              workload_name=workload_name,
+              namespace=self.namespace,
+              queue_name=self.queue,
+              priority_class=self.priority,
+              topology=topology,
+              docker_image=self.docker_image,
+              config_rel_path=rel_path,
+              gcs_output_dir=gcs_output_dir,
+              runtime=runtime,
+              git_repo=self.git_repo,
+              git_branch=self.git_branch,
+              accelerator=acc,
+          )
+          # The Pathways head pod plus one pod per TPU host.
+          total_pods = topo_info["num_nodes"] + 1
+        else:
+          manifest = generate_jobset_manifest(
+              workload_name=workload_name,
+              namespace=self.namespace,
+              queue_name=self.queue,
+              priority_class=self.priority,
+              topology=topology,
+              docker_image=self.docker_image,
+              config_rel_path=rel_path,
+              gcs_output_dir=gcs_output_dir,
+              declared_duration_minutes=self.declared_duration_minutes,
+              template_path=self.template_path,
+              upload_trace=self.upload_trace,
+              git_branch=self.git_branch,
+              reservation_name=self.reservation_name,
+              accelerator=acc,
+              topo_info=topo_info,
+              git_repo=self.git_repo,
+          )
+          total_pods = topo_info["num_nodes"]
 
-      self.active_workloads[workload_name] = ActiveWorkload(
-          workload_name=workload_name,
-          config_name=config_name,
-          config_rel_path=rel_path,
-          topology=topology,
-          manifest_yaml=manifest,
-          gcs_output_dir=gcs_output_dir,
-          start_time=time.time(),
-          total_pods=topo_info["num_nodes"],
-      )
+        if self.dry_run:
+          print(
+              "\n[Dry-Run: Workload Submitter - JobSet Manifest for"
+              f" '{config_name}' ({topology}) on {runtime.name}]"
+          )
+          print(manifest)
+          dry_run_results.append(
+              BenchmarkResult(
+                  workload_name=workload_name,
+                  config_name=config_name,
+                  config_rel_path=rel_path,
+                  topology=topology,
+                  status="DRY_RUN",
+                  duration_seconds=0.0,
+                  gcs_artifact_path=gcs_output_dir,
+                  runtime=runtime.name,
+                  provenance=provenance,
+              )
+          )
+          continue
+
+        self.pending_workloads[workload_name] = ActiveWorkload(
+            workload_name=workload_name,
+            config_name=config_name,
+            config_rel_path=rel_path,
+            topology=topology,
+            manifest_yaml=manifest,
+            gcs_output_dir=gcs_output_dir,
+            start_time=time.time(),
+            total_pods=total_pods,
+            runtime=runtime.name,
+            provenance=provenance,
+            fixed_name=runtime.is_pathways,
+        )
 
     return dry_run_results
 
+  def _in_flight(self) -> int:
+    return sum(1 for wl in self.active_workloads.values() if not wl.terminal)
+
+  def _submit_one(self, name: str, wl: ActiveWorkload) -> None:
+    """Creates one JobSet and moves it from pending to active."""
+    key = name
+    try:
+      logging.info(
+          "Applying JobSet [%s] (%s, %s, %s)...",
+          name,
+          wl.config_name,
+          wl.topology,
+          wl.runtime,
+      )
+      if wl.fixed_name:
+        # A leftover JobSet of the same name (e.g. from an interrupted
+        # night) would make `kubectl create` fail.
+        _delete_existing_jobset(name, self.namespace)
+      wl.start_time = time.time()
+      wl.workload_name = apply_jobset(wl.manifest_yaml)
+      key = wl.workload_name
+      upload_provenance(wl.gcs_output_dir, wl.provenance)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.error("Failed to apply JobSet %s: %s", name, e)
+      wl.status = "FAILED"
+      wl.error_message = str(e)
+      wl.terminal = True
+    self.pending_workloads.pop(name, None)
+    self.active_workloads[key] = wl
+
+  def _submit_pending(self) -> int:
+    """Submits pending JobSets while fewer than `max_parallel` are in flight."""
+    submitted = 0
+    for name, wl in list(self.pending_workloads.items()):
+      if self.max_parallel is not None and self._in_flight() >= self.max_parallel:
+        break
+      self._submit_one(name, wl)
+      submitted += 1
+    return submitted
+
   def submit_all(self) -> None:
-    """Dispatches all prepared JobSets to the cluster in parallel via kubectl."""
-    logging.info(
-        "Dispatching %d JobSet(s) in parallel via kubectl...",
-        len(self.active_workloads),
-    )
-    updated_workloads: dict[str, ActiveWorkload] = {}
-    for name, wl in list(self.active_workloads.items()):
-      key = name
-      try:
-        logging.info(
-            "Applying JobSet [%s] (%s, %s)...",
-            name,
-            wl.config_name,
-            wl.topology,
-        )
-        wl.workload_name = apply_jobset(wl.manifest_yaml)
-        key = wl.workload_name
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.error("Failed to apply JobSet %s: %s", name, e)
-        wl.status = "FAILED"
-        wl.error_message = str(e)
-        wl.terminal = True
-      updated_workloads[key] = wl
-    self.active_workloads = updated_workloads
+    """Dispatches the prepared JobSets via kubectl, `max_parallel` at a time."""
+    total = len(self.pending_workloads)
+    if self.max_parallel is None:
+      logging.info("Dispatching %d JobSet(s) in parallel via kubectl...", total)
+    else:
+      logging.info(
+          "Dispatching %d JobSet(s) via kubectl, at most %d in flight...",
+          total,
+          self.max_parallel,
+      )
+    self._submit_pending()
 
   def cleanup_workloads(self, only_terminal: bool = True) -> None:
     """Deletes JobSets from the namespace for finished (or all) workloads."""
@@ -1005,7 +1282,15 @@ class WorkloadManager:
     """Monitors active workloads in parallel with periodic status dashboards and immediate cleanup."""
     last_report_time = 0.0
     timeout_seconds = _timeout_seconds(self.timeout_minutes)
-    deadline = self.start_time + (timeout_seconds or float("inf"))
+    waves = 1
+    if self.max_parallel and timeout_seconds:
+      total = len(self.active_workloads) + len(self.pending_workloads)
+      waves = max(1, -(-total // self.max_parallel))
+    # Each workload gets `timeout_minutes` from its own submission; the whole
+    # run gets one timeout per wave of submissions.
+    deadline = self.start_time + (
+        timeout_seconds * waves if timeout_seconds else float("inf")
+    )
     timeout_label = (
         f"{self.timeout_minutes}m" if timeout_seconds else "infinite"
     )
@@ -1072,6 +1357,11 @@ class WorkloadManager:
           pods_data,
           timeout_minutes=self.timeout_minutes,
       )
+      if self.pending_workloads:
+        if self._submit_pending():
+          all_done = False
+        elif self.pending_workloads:
+          all_done = False
 
       cleaned_any = False
       if self.cleanup and any(
@@ -1108,7 +1398,14 @@ class WorkloadManager:
       time.sleep(self.tick_interval_seconds)
 
     results = []
-    for wl in self.active_workloads.values():
+    for wl in self.pending_workloads.values():
+      # Never submitted: the overall deadline passed first.
+      wl.status = "TIMEOUT"
+      wl.error_message = "Not submitted before the overall deadline."
+      wl.terminal = True
+    for wl in list(self.active_workloads.values()) + list(
+        self.pending_workloads.values()
+    ):
       results.append(
           BenchmarkResult(
               workload_name=wl.workload_name,
@@ -1119,6 +1416,8 @@ class WorkloadManager:
               duration_seconds=wl.duration_seconds,
               gcs_artifact_path=wl.gcs_output_dir,
               error_message=wl.error_message,
+              runtime=wl.runtime,
+              provenance=wl.provenance,
           )
       )
 
@@ -1146,6 +1445,19 @@ class WorkloadManager:
     return self.poll()
 
 
+def resolve_runtimes(
+    runtimes_arg: Optional[str], suite_file: Optional[str]
+) -> list[runtimes_lib.Runtime]:
+  """Resolves the runtimes to run: `--runtimes`, else the suite's list, else McJAX."""
+  if runtimes_arg:
+    return runtimes_lib.parse_runtimes([runtimes_arg])
+  if suite_file:
+    suite_source = _find_existing(suite_file)
+    if suite_source is not None:
+      return runtimes_lib.parse_runtimes(load_suite_runtimes(str(suite_source)))
+  return [runtimes_lib.MCJAX]
+
+
 def submit_workloads(
     config_files: list[pathlib.Path],
     namespace: str = utils.DEFAULT_NAMESPACE,
@@ -1163,8 +1475,11 @@ def submit_workloads(
     dry_run: bool = False,
     reservation_name: Optional[str] = utils.DEFAULT_RESERVATION_NAME,
     accelerator: Optional[str] = None,
+    git_repo: str = utils.DEFAULT_GIT_REPO,
+    runtimes: Optional[Sequence[runtimes_lib.Runtime]] = None,
+    max_parallel: Optional[int] = None,
 ) -> list[BenchmarkResult]:
-  """Prepares and submits all targeted benchmark configs in parallel using jobset_template.yaml."""
+  """Prepares and submits all targeted configs on every runtime in parallel."""
   manager = WorkloadManager(
       namespace=namespace,
       queue=queue,
@@ -1181,6 +1496,9 @@ def submit_workloads(
       dry_run=dry_run,
       reservation_name=reservation_name,
       accelerator=accelerator,
+      git_repo=git_repo,
+      runtimes=list(runtimes or [runtimes_lib.MCJAX]),
+      max_parallel=max_parallel,
   )
   return manager.run(config_files)
 
@@ -1216,10 +1534,12 @@ def main(argv: Sequence[str]) -> None:
         "No YAML configuration files found matching selection criteria."
     )
   accelerator = infer_configs_accelerator(config_files, args.accelerator)
+  runtimes = resolve_runtimes(args.runtimes, args.suite_file)
   logging.info(
-      "Resolved %d %s benchmark configuration(s) for submission.",
+      "Resolved %d %s benchmark configuration(s) for submission on %s.",
       len(config_files),
       accelerator,
+      [r.name for r in runtimes],
   )
   submit_workloads(
       config_files=config_files,
@@ -1238,6 +1558,9 @@ def main(argv: Sequence[str]) -> None:
       dry_run=args.dry_run,
       reservation_name=args.reservation_name,
       accelerator=accelerator,
+      git_repo=args.git_repo,
+      runtimes=runtimes,
+      max_parallel=args.max_parallel,
   )
 
 

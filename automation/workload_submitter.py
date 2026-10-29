@@ -982,6 +982,42 @@ def record_pod_placement(
   return True
 
 
+_PATHWAYS_HEAD_LABEL = ("jobset.sigs.k8s.io/replicatedjob-name", "pathways-head")
+
+
+def pathways_head_restarts(pod_list: list[dict[str, Any]]) -> list[str]:
+  """Returns the containers of a Pathways head pod that have restarted.
+
+  The resource manager and proxy are sidecars of the head pod; when one of
+  them crashes and restarts (seen after Kueue preempts and re-admits a
+  JobSet: the new RM registers with the terminating old head and its watchdog
+  kills it) the client in `user-workload` keeps waiting on the dead backend
+  until the timeout. Such a run cannot produce results, so it is failed at
+  once and left to `--retries`.
+
+  Args:
+    pod_list: `kubectl get pods` items of one JobSet.
+
+  Returns:
+    Descriptions like `pathways-rm (exit 139)`, empty if nothing restarted.
+  """
+  key, value = _PATHWAYS_HEAD_LABEL
+  restarted = []
+  for pod in pod_list:
+    if pod.get("metadata", {}).get("labels", {}).get(key) != value:
+      continue
+    status = pod.get("status", {})
+    for cs in status.get("initContainerStatuses", []) + status.get(
+        "containerStatuses", []
+    ):
+      if not cs.get("restartCount"):
+        continue
+      last = cs.get("lastState", {}).get("terminated", {}) or {}
+      detail = f"exit {last['exitCode']}" if "exitCode" in last else "restarted"
+      restarted.append(f"{cs.get('name')} ({detail})")
+  return restarted
+
+
 def update_workload_states(
     active_workloads: dict[str, ActiveWorkload],
     jobsets_data: dict[str, dict[str, Any]],
@@ -1094,6 +1130,20 @@ def update_workload_states(
       wl.terminal = True
 
     if wl.terminal:
+      continue
+
+    # A Pathways head whose RM or proxy restarted will not finish (the client
+    # is bound to the dead instance): fail it now rather than at the timeout.
+    restarted = pathways_head_restarts(pod_list)
+    if restarted:
+      wl.status = "FAILED"
+      wl.error_message = (
+          "Pathways head container restarted: "
+          + ", ".join(restarted)
+          + "; the client cannot reconnect (typically after a Kueue"
+          " preemption and requeue)."
+      )
+      wl.terminal = True
       continue
 
     # Determine status from pods if not already terminal from JobSet conditions

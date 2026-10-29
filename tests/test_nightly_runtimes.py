@@ -13,6 +13,7 @@
 # limitations under the License.
 """Tests for the runtime matrix: runtimes, naming, comparison and BigQuery rows."""
 
+import dataclasses
 import datetime
 import json
 import os
@@ -342,6 +343,49 @@ class PodDigestTest(absltest.TestCase):
         {"name": "sidecar", "imageID": "other@sha256:" + "d" * 64},
     ]}}
     return [head, worker]
+
+  def test_pathways_head_restart_fails_fast(self):
+    head_label = {"jobset.sigs.k8s.io/replicatedjob-name": "pathways-head"}
+    worker_label = {"jobset.sigs.k8s.io/replicatedjob-name": "pathways-worker"}
+    healthy = [
+        {"metadata": {"labels": head_label}, "status": {"phase": "Running",
+            "initContainerStatuses": [{"name": "pathways-rm", "restartCount": 0}],
+            "containerStatuses": [{"name": "user-workload", "restartCount": 0}]}},
+        {"metadata": {"labels": worker_label}, "status": {"phase": "Running",
+            "containerStatuses": [{"name": "pathways-worker", "restartCount": 2}]}},
+    ]
+    self.assertEqual(workload_submitter.pathways_head_restarts(healthy), [])
+    crashed = [
+        {"metadata": {"labels": head_label}, "status": {"phase": "Running",
+            "initContainerStatuses": [{"name": "pathways-rm", "restartCount": 1,
+                "lastState": {"terminated": {"exitCode": 139, "reason": "Error"}}}],
+            "containerStatuses": [{"name": "user-workload", "restartCount": 0}]}},
+    ]
+    self.assertEqual(
+        workload_submitter.pathways_head_restarts(crashed), ["pathways-rm (exit 139)"]
+    )
+    name = "tpums-rapid-all-gather"
+    wl = workload_submitter.ActiveWorkload(
+        workload_name=name, config_name="all_gather", config_rel_path="c",
+        topology="4x8", manifest_yaml="", gcs_output_dir="gs://b", start_time=time.time(),
+        total_pods=9, runtime="rapid",
+    )
+    # Not terminal from the JobSet's conditions: the restart fails it.
+    done = workload_submitter.update_workload_states(
+        {name: wl}, {name: {"status": {"conditions": []}}}, {name: crashed}, timeout_minutes=25
+    )
+    self.assertTrue(done)
+    self.assertEqual(wl.status, "FAILED")
+    self.assertIn("pathways-rm (exit 139)", wl.error_message)
+    # A JobSet that completed anyway keeps its success.
+    wl2 = dataclasses.replace(wl, status="SUBMITTED", terminal=False, error_message=None)
+    workload_submitter.update_workload_states(
+        {name: wl2},
+        {name: {"status": {"conditions": [{"type": "Completed", "status": "True"}]}}},
+        {name: crashed},
+        timeout_minutes=25,
+    )
+    self.assertEqual(wl2.status, "SUCCESS")
 
   def test_pod_node_pools_and_placement(self):
     pods = [

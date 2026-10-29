@@ -450,10 +450,11 @@ def fetch_environment_metadata(
 
   # 2. Look for git_commit.txt on GCS
   if not metadata[utils.ENV_GIT_COMMIT] and target_prefix:
-    # A single URL: multi-URL `ls` exits non-zero if any URL matches nothing,
-    # even when others match.
+    # One recursive URL: it matches <prefix>/<config>/git_commit.txt (upstream
+    # layout) as well as <prefix>/<runtime>/<config>/git_commit.txt (runtime
+    # matrix), and multi-URL `ls` exits non-zero if any URL matches nothing.
     git_listing = _gcloud_storage_stdout(
-        ["ls", f"{target_prefix}/*/git_commit.txt"]
+        ["ls", f"{target_prefix}/**/git_commit.txt"]
     )
     git_lines = [
         line for line in (git_listing or "").split() if line.endswith(".txt")

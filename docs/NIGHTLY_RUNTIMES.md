@@ -39,24 +39,29 @@ the benchmark code; the aggregator stamps these onto every row as the
 
 BigQuery: `cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks`
 (created on first write) uses uBench's `MicrobenchmarkSchema` column names, so
-rows can be copied into uBench's tables later. `run_group` is the date,
-`run_source` the runtime, `metrics_other` the full `summary.csv` metric set,
-`configs_container_image` the Pathways images / digests.
+rows can be copied into uBench's tables later. `run_name` / `run_group` are
+`tpums-nightly-<date>`, `run_id` is `<run_name>_<runtime>_<config>_<n>`, the
+runtime is `params_other.runtime`, `metrics_other` carries the full
+`summary.csv` metric set, and Pathways rows put the server / proxy images and
+digests in `configs_container_image` and `params_other`.
 
 ```sql
-SELECT run_source AS runtime, benchmark_name, params_other,
-       metrics_time_per_iter_ms_p50, metrics_achieved_bandwidth_gbps_p50
+SELECT JSON_VALUE(params_other, '$.runtime') AS runtime, benchmark_name,
+       JSON_VALUE(params_other, '$.matrix_dim') AS matrix_dim,
+       metrics_time_per_iter_ms_p50, metrics_achieved_bandwidth_gbps_p50,
+       metrics_tflops_achieved_p50
 FROM `cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks`
-WHERE run_group = '2026-10-29'
-ORDER BY benchmark_name, runtime;
+WHERE run_group = 'tpums-nightly-2026-10-29'
+ORDER BY benchmark_name, matrix_dim, runtime;
 ```
 
 Report sections: the upstream per-category tables plus **Runtimes** (images,
 digests, commit) and **Runtime Comparison** (per test case one row per
 runtime, Pathways / McJAX ratio on `xprof_p50_ms` when both sides have XProf,
-else on `wall_clock_p50_ms`, and an XProf-availability marker). The open-source
-Pathways images do not expose device traces, so Louhi / Rapid rows are
-wall-clock only.
+else on `wall_clock_p50_ms`, and an XProf-availability marker). The public
+Louhi images do not expose device traces, so Louhi rows are wall-clock only;
+the Rapid images do, so Rapid rows carry both (device time matches McJAX,
+wall clock adds the proxy round trip).
 
 ## Scheduling (GKE CronJob)
 

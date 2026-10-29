@@ -193,10 +193,12 @@ class ReportGeneratorTest(parameterized.TestCase):
     self.assertEqual(env[utils.ENV_JAX_VERSION], "0.11.1")
     self.assertEqual(env[utils.ENV_LIBTPU_VERSION], "0.0.46.1")
     self.assertEqual(env[utils.ENV_GIT_COMMIT], "abcdef1234567890")
-    # A single URL: a multi-URL `ls` fails if any URL matches nothing.
+    # A single recursive URL: it matches both <date>/<config>/ and
+    # <date>/<runtime>/<config>/ layouts, and a multi-URL `ls` fails if any
+    # URL matches nothing.
     self.assertEqual(
         mock_run.call_args_list[3].args[0],
-        ["gcloud", "storage", "ls", "gs://bucket/2026-08-27/*/git_commit.txt"],
+        ["gcloud", "storage", "ls", "gs://bucket/2026-08-27/**/git_commit.txt"],
     )
 
     with mock.patch("subprocess.run") as mock_run_empty:

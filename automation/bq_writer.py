@@ -158,8 +158,11 @@ _PROVENANCE_KEYS = (
     "node_pools",
 )
 # Per-measurement columns that stay in `params_other` but must not make the
-# case id differ between two measurements of the same case.
-_VOLATILE_KEYS = frozenset({"start", "end", "start_time", "end_time", "timestamp"})
+# case id differ between two measurements of the same case: timestamps, and
+# summary.csv's `test_name`, which is `<Benchmark>_<epoch seconds>`.
+_VOLATILE_KEYS = frozenset(
+    {"start", "end", "start_time", "end_time", "timestamp", "test_name"}
+)
 
 
 def case_run_id(

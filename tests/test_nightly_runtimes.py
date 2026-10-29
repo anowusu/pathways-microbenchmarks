@@ -553,9 +553,11 @@ class BqWriterTest(absltest.TestCase):
 
   def test_case_run_id_is_stable_and_ignores_metrics_and_provenance(self):
     base = _row("rapid", "1.0", "2.0", client_image_digest="sha256:aaa", git_commit="c1",
-                start="2026-10-29T20:08:59+00:00", node_pools="gke-tpu-a")
+                start="2026-10-29T20:08:59+00:00", node_pools="gke-tpu-a",
+                test_name="AllGatherBenchmark_1793306671")
     rerun = _row("rapid", "1.1", "2.3", client_image_digest="sha256:bbb", git_commit="c2",
-                 start="2026-10-29T20:24:24+00:00", node_pools="gke-tpu-b")
+                 start="2026-10-29T20:24:24+00:00", node_pools="gke-tpu-b",
+                 test_name="AllGatherBenchmark_1793307999")
     other_case = _row("rapid", "1.0", "2.0", matrix_dim="16384")
     ids = []
     for row in (base, rerun, other_case):

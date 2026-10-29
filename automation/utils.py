@@ -34,6 +34,8 @@ DEFAULT_ZONE = os.environ.get("ZONE", f"{DEFAULT_REGION}-c")
 DEFAULT_NAMESPACE = os.environ.get("NAMESPACE", "default")
 DEFAULT_QUEUE = os.environ.get("QUEUE", "multislice-queue")
 DEFAULT_PRIORITY = os.environ.get("PRIORITY", "medium")
+# Pod PriorityClass of the benchmark pods; "" leaves it unset.
+DEFAULT_POD_PRIORITY_CLASS = os.environ.get("POD_PRIORITY_CLASS", "")
 DEFAULT_DOCKER_IMAGE = os.environ.get(
     "DOCKER_IMAGE", "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
 )
@@ -521,7 +523,14 @@ def add_workload_args(
   for flag, default, help_text in (
       ("--namespace", DEFAULT_NAMESPACE, "Target namespace"),
       ("--queue", DEFAULT_QUEUE, "Target Kueue LocalQueue"),
-      ("--priority", DEFAULT_PRIORITY, "Priority class"),
+      ("--priority", DEFAULT_PRIORITY, "Kueue priority class label ('' = none)"),
+      (
+          "--pod-priority-class",
+          DEFAULT_POD_PRIORITY_CLASS,
+          "Pod PriorityClass of the benchmark pods ('' = none); on shared"
+          " Kueue clusters without WorkloadPriorityClasses it sets the"
+          " workload priority, i.e. who preempts whom",
+      ),
       ("--docker-image", DEFAULT_DOCKER_IMAGE, "Base TPU container image"),
       ("--gcs-bucket", DEFAULT_GCS_BUCKET, "GCS output bucket"),
       ("--git-repo", DEFAULT_GIT_REPO, "Git repository cloned in the JobSet"),

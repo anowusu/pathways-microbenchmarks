@@ -23,6 +23,7 @@
 #   export NAMESPACE="default"
 #   export QUEUE_NAME="multislice-queue"
 #   export PRIORITY_CLASS="medium"
+#   export POD_PRIORITY_CLASS="medium"  # optional pod PriorityClass
 #   export ACCELERATOR="tpu7x"  # REQUIRED: "tpu7x" or "tpu-v6e-slice"
 #   export TOPOLOGY="2x2x1"
 #   export EXCLUSIVE_TOPOLOGY="kubernetes.io/hostname"  # or "cloud.google.com/gke-nodepool" for multi-host
@@ -74,6 +75,9 @@ spec:
                 declared-duration-minutes: "${DECLARED_DURATION}"
             spec:
               restartPolicy: Never
+              # Pod PriorityClass; Kueue also takes the workload priority from it
+              # when no WorkloadPriorityClass label is set. Dropped when empty.
+              priorityClassName: ${POD_PRIORITY_CLASS}
               hostNetwork: true
               dnsPolicy: ClusterFirstWithHostNet
               tolerations:

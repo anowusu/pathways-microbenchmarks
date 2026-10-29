@@ -85,6 +85,12 @@ spec:
                 # Empty: this cluster defines pod PriorityClasses only, no Kueue
                 # WorkloadPriorityClasses, so the Kueue priority label is omitted.
                 - --priority=
+                # Pod PriorityClass (the cluster has very-low/low/medium/high/
+                # very-high). Kueue derives the workload priority from it, and
+                # it preempts lower-priority workloads within the ClusterQueue:
+                # without it the benchmarks run at priority 0 and get preempted
+                # by every other job on this shared cluster.
+                - --pod-priority-class=medium
                 - --suite-file=automation/canonical_suite_v5e.yaml
                 - --runtimes=mcjax,louhi,rapid
                 - --max-parallel=3

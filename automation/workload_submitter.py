@@ -444,6 +444,7 @@ def generate_pathways_manifest(
     git_repo: str = utils.DEFAULT_GIT_REPO,
     git_branch: str = utils.DEFAULT_GIT_BRANCH,
     accelerator: Optional[str] = None,
+    pod_priority_class: str = "",
 ) -> str:
   """Generates the Pathways JobSet manifest of one config on a Pathways runtime.
 
@@ -466,6 +467,7 @@ def generate_pathways_manifest(
     git_branch: Branch or tag it checks out.
     accelerator: Accelerator family (`v5e`, `v6e`, `tpu7x`); inferred from
       the config path if None.
+    pod_priority_class: Pod PriorityClass of head and worker pods ("" = none).
 
   Returns:
     The JobSet manifest YAML.
@@ -497,6 +499,7 @@ def generate_pathways_manifest(
           if priority_class
           else None
       ),
+      pod_priority_class=pod_priority_class,
   )
   return yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
 
@@ -518,6 +521,7 @@ def generate_jobset_manifest(
     accelerator: Optional[str] = None,
     topo_info: Optional[dict[str, Any]] = None,
     git_repo: str = utils.DEFAULT_GIT_REPO,
+    pod_priority_class: str = "",
 ) -> str:
   """Generates a native GKE JobSet manifest using automation/jobset_template.yaml."""
   if topo_info is None:
@@ -546,6 +550,7 @@ def generate_jobset_manifest(
       "${NAMESPACE}": namespace,
       "${QUEUE_NAME}": queue_name,
       "${PRIORITY_CLASS}": priority_class,
+      "${POD_PRIORITY_CLASS}": pod_priority_class,
       "${ACCELERATOR}": topo_info["gke_accelerator"],
       "${TOPOLOGY}": topology,
       "${EXCLUSIVE_TOPOLOGY}": exclusive_topology,
@@ -571,6 +576,9 @@ def generate_jobset_manifest(
     manifest = re.sub(
         r"\n\s*kueue\.x-k8s\.io/priority-class:[^\n]*", "", manifest
     )
+  # The pod PriorityClass is optional too.
+  if not pod_priority_class:
+    manifest = re.sub(r"\n\s*priorityClassName:[^\n]*", "", manifest)
   # Handle multi-node placement policy substitution
   if placement_policy:
     manifest = re.sub(
@@ -1072,6 +1080,9 @@ class WorkloadManager:
   # At most this many JobSets are submitted at a time (None: all at once);
   # the rest wait in `pending_workloads` and are submitted as others finish.
   max_parallel: Optional[int] = None
+  # Pod PriorityClass of every benchmark pod ("" = none). On shared Kueue
+  # clusters it decides who preempts whom.
+  pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS
 
   active_workloads: dict[str, ActiveWorkload] = dataclasses.field(
       default_factory=dict
@@ -1164,6 +1175,7 @@ class WorkloadManager:
               git_repo=self.git_repo,
               git_branch=self.git_branch,
               accelerator=acc,
+              pod_priority_class=self.pod_priority_class,
           )
           # The Pathways head pod plus one pod per TPU host.
           total_pods = topo_info["num_nodes"] + 1
@@ -1185,6 +1197,7 @@ class WorkloadManager:
               accelerator=acc,
               topo_info=topo_info,
               git_repo=self.git_repo,
+              pod_priority_class=self.pod_priority_class,
           )
           total_pods = topo_info["num_nodes"]
 
@@ -1485,6 +1498,7 @@ def submit_workloads(
     git_repo: str = utils.DEFAULT_GIT_REPO,
     runtimes: Optional[Sequence[runtimes_lib.Runtime]] = None,
     max_parallel: Optional[int] = None,
+    pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS,
 ) -> list[BenchmarkResult]:
   """Prepares and submits all targeted configs on every runtime in parallel."""
   manager = WorkloadManager(
@@ -1506,6 +1520,7 @@ def submit_workloads(
       git_repo=git_repo,
       runtimes=list(runtimes or [runtimes_lib.MCJAX]),
       max_parallel=max_parallel,
+      pod_priority_class=pod_priority_class,
   )
   return manager.run(config_files)
 
@@ -1568,6 +1583,7 @@ def main(argv: Sequence[str]) -> None:
       git_repo=args.git_repo,
       runtimes=runtimes,
       max_parallel=args.max_parallel,
+      pod_priority_class=args.pod_priority_class,
   )
 
 

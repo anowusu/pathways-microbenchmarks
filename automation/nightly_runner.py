@@ -161,6 +161,7 @@ def run_pipeline(
     bq_table: Optional[str] = None,
     max_parallel: Optional[int] = None,
     skip_cluster_credentials: bool = False,
+    pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS,
 ) -> list[workload_submitter.BenchmarkResult]:
   """Executes the benchmark automation pipeline (Workload Submission, Metrics Aggregation, Report Generation)."""
   # Resolve the selection first so flag misuse fails before any GCS or
@@ -196,7 +197,11 @@ def run_pipeline(
   )
   logging.info("Accelerator      : %s", acc)
   logging.info(
-      "Namespace / Queue: %s / %s (Priority: %s)", namespace, queue, priority
+      "Namespace / Queue: %s / %s (Kueue priority: %r, pod priority: %r)",
+      namespace,
+      queue,
+      priority,
+      pod_priority_class,
   )
   if reservation_name:
     logging.info("Reservation Name : %s", reservation_name)
@@ -247,6 +252,7 @@ def run_pipeline(
       git_repo=git_repo,
       runtimes=runtimes,
       max_parallel=max_parallel,
+      pod_priority_class=pod_priority_class,
   )
 
   # Ingest summary.csv metrics; a JobSet that exited 0 without producing any
@@ -424,6 +430,7 @@ def main(argv: Sequence[str]) -> None:
       bq_table=args.bq_table,
       max_parallel=args.max_parallel,
       skip_cluster_credentials=args.skip_cluster_credentials,
+      pod_priority_class=args.pod_priority_class,
   )
 
 

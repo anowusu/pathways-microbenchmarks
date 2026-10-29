@@ -181,6 +181,55 @@ class WorkloadNamingTest(parameterized.TestCase):
     self.assertNotEmpty(proxy_flags)
     self.assertEqual(proxy_flags, worker_flags)
     self.assertTrue(proxy["image"].startswith(runtimes.RAPID.pathways_proxy_image))
+    # No pod priority class requested: neither pod template sets one.
+    self.assertNotIn("priorityClassName", head_spec)
+    self.assertNotIn("priorityClassName", worker["template"]["spec"]["template"]["spec"])
+
+  @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
+  def test_pathways_manifest_sets_pod_priority_class(self):
+    manifest = workload_submitter.generate_pathways_manifest(
+        workload_name="tpums-louhi-gemm",
+        namespace="default",
+        queue_name="multislice-queue",
+        priority_class="",
+        topology="4x8",
+        docker_image="img:latest",
+        config_rel_path="configs/v5e/4x8/gemm.yaml",
+        gcs_output_dir="gs://b/2026-10-29/louhi/gemm",
+        runtime=runtimes.LOUHI,
+        pod_priority_class="medium",
+    )
+    doc = yaml.safe_load(manifest)
+    # Empty Kueue priority: only the queue label remains.
+    self.assertEqual(
+        doc["metadata"]["labels"], {"kueue.x-k8s.io/queue-name": "multislice-queue"}
+    )
+    for replicated_job in doc["spec"]["replicatedJobs"]:
+      pod_spec = replicated_job["template"]["spec"]["template"]["spec"]
+      self.assertEqual(pod_spec["priorityClassName"], "medium", replicated_job["name"])
+
+  def test_mcjax_manifest_pod_priority_class_is_optional(self):
+    common = dict(
+        workload_name="tpums-4x8-mcjax-gemm",
+        namespace="default",
+        queue_name="multislice-queue",
+        priority_class="",
+        topology="4x8",
+        docker_image="img:latest",
+        config_rel_path="configs/v5e/4x8/gemm.yaml",
+        gcs_output_dir="gs://b/2026-10-29/mcjax/gemm",
+        accelerator="v5e",
+    )
+    without = yaml.safe_load(workload_submitter.generate_jobset_manifest(**common))
+    with_prio = yaml.safe_load(
+        workload_submitter.generate_jobset_manifest(**common, pod_priority_class="medium")
+    )
+    pod_spec = lambda doc: doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+    self.assertNotIn("priorityClassName", pod_spec(without))
+    self.assertNotIn("kueue.x-k8s.io/priority-class", without["metadata"]["labels"])
+    self.assertEqual(pod_spec(with_prio)["priorityClassName"], "medium")
+    self.assertEqual(pod_spec(with_prio)["restartPolicy"], "Never")
+    self.assertTrue(pod_spec(with_prio)["hostNetwork"])
 
 
 class RuntimeComparisonTest(absltest.TestCase):

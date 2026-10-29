@@ -65,6 +65,11 @@ def _parse_args() -> argparse.Namespace:
   add("--pathways_server_image", default=_SERVER_IMAGE, help="RM/worker image.")
   add("--pathways_proxy_image", default=_PROXY_IMAGE, help="Proxy image.")
   add("--queue", default="", help="Kueue LocalQueue name (default: none).")
+  add(
+      "--pod_priority_class",
+      default="",
+      help="Pod PriorityClass of the head and worker pods (default: none).",
+  )
   add("--repo", default=_REPO_URL, help="TPUMS repository to run.")
   add("--ref", default="main", help="Branch or tag of --repo to run.")
   add("--apply", action="store_true", help="Create the JobSet, not just YAML.")
@@ -104,6 +109,7 @@ def build_pathways_jobset(
     xprof_dir: Optional[str] = None,
     extra_labels: Optional[dict[str, str]] = None,
     extra_env: Optional[dict[str, str]] = None,
+    pod_priority_class: str = "",
 ) -> jobset.PathwaysJobSet:
   """Builds the Pathways JobSet that runs one TPUMS config.
 
@@ -128,6 +134,9 @@ def build_pathways_jobset(
       `<gcs_dir>/xprof`); must be a `gs://` path the workers can reach.
     extra_labels: Additional JobSet labels, e.g. a Kueue priority class.
     extra_env: Additional environment variables of the client container.
+    pod_priority_class: Pod PriorityClass of the head and worker pods, or ""
+      for none. On shared Kueue clusters without WorkloadPriorityClasses this
+      is what sets the workload priority (and so who preempts whom).
 
   Returns:
     The JobSet, ready for `export_yaml()` or `apply()`.
@@ -145,6 +154,9 @@ def build_pathways_jobset(
   labels = dict(extra_labels or {})
   if queue:
     labels["kueue.x-k8s.io/queue-name"] = queue
+  pod_spec_kwargs = (
+      {"priority_class_name": pod_priority_class} if pod_priority_class else None
+  )
   pathways_jobset = jobset.PathwaysJobSet(
       name=name,
       namespace=namespace,
@@ -156,6 +168,8 @@ def build_pathways_jobset(
       pathways_rm_and_worker_image=pathways_server_image,
       pathways_proxy_image=pathways_proxy_image,
       labels=labels or None,
+      head_pod_spec_kwargs=pod_spec_kwargs,
+      worker_pod_spec_kwargs=pod_spec_kwargs,
       proxy_container_kwargs={"args": flags} if flags else None,
       worker_container_kwargs=worker_kwargs or None,
   )
@@ -189,6 +203,7 @@ def build_jobset(args: argparse.Namespace) -> jobset.PathwaysJobSet:
       queue=args.queue,
       repo=args.repo,
       ref=args.ref,
+      pod_priority_class=args.pod_priority_class,
   )
 
 

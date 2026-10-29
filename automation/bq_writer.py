@@ -149,8 +149,14 @@ def benchmark_type_of(category: str) -> str:
   return "collective" if category == "collectives" else "compute"
 
 
-# Row columns that identify the build, not the benchmark case.
-_PROVENANCE_KEYS = ("runtime", "benchmark", "git_commit", "client_image_digest")
+# Row columns that identify the build or placement, not the benchmark case.
+_PROVENANCE_KEYS = (
+    "runtime",
+    "benchmark",
+    "git_commit",
+    "client_image_digest",
+    "node_pools",
+)
 
 
 def case_run_id(
@@ -223,6 +229,8 @@ def row_to_record(
   params["platform"] = {k: row.get(k, "") for k in _PLATFORM_KEYS}
   if row.get("client_image_digest"):
     params["client_image_digest"] = row["client_image_digest"]
+  if row.get("node_pools"):
+    params["node_pools"] = row["node_pools"]
   if runtime != runtimes_lib.MCJAX.name:
     params["pathways"] = {
         "server_image": row.get("pathways_server_image", ""),

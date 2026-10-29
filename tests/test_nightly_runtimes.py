@@ -343,6 +343,35 @@ class PodDigestTest(absltest.TestCase):
     ]}}
     return [head, worker]
 
+  def test_pod_node_pools_and_placement(self):
+    pods = [
+        {"spec": {"nodeName": "gke-pw-scale-test-v5e-32-default-pool-ddc42050-0kwu"}},
+        {"spec": {"nodeName": "gke-tpu-31dbadc5-jt36"}},
+        {"spec": {"nodeName": "gke-tpu-31dbadc5-q8xp"}},
+        {"spec": {}},  # not scheduled yet
+    ]
+    self.assertEqual(
+        workload_submitter.pod_node_pools(pods),
+        ["gke-pw-scale-test-v5e-32-default-pool-ddc42050", "gke-tpu-31dbadc5"],
+    )
+    wl = workload_submitter.ActiveWorkload(
+        workload_name="w", config_name="gemm", config_rel_path="c", topology="4x8",
+        manifest_yaml="", gcs_output_dir="gs://b", start_time=0.0, total_pods=9,
+    )
+    self.assertFalse(workload_submitter.record_pod_placement(wl, [{"spec": {}}]))
+    self.assertTrue(workload_submitter.record_pod_placement(wl, pods))
+    self.assertEqual(
+        wl.provenance["node_pools"],
+        "gke-pw-scale-test-v5e-32-default-pool-ddc42050,gke-tpu-31dbadc5",
+    )
+    self.assertFalse(workload_submitter.record_pod_placement(wl, pods))
+    # The comparison shows the TPU slice, not the CPU pool of the head.
+    self.assertEqual(
+        runtime_comparison._tpu_slice({"node_pools": wl.provenance["node_pools"]}),
+        "tpu-31dbadc5",
+    )
+    self.assertEqual(runtime_comparison._tpu_slice({}), "")
+
   def test_pod_image_digests(self):
     self.assertEqual(
         workload_submitter.pod_image_digests(self._pods()),

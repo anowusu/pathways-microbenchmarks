@@ -944,6 +944,44 @@ def record_pod_digests(
   return changed
 
 
+def pod_node_pools(pod_list: list[dict[str, Any]]) -> list[str]:
+  """Returns the node pools (by node-name prefix) the pods were scheduled on.
+
+  GKE names nodes `<pool-prefix>-<id>`, e.g. `gke-tpu-31dbadc5-jt36` for the
+  nodes of one TPU slice, so the prefix identifies the slice a workload ran
+  on without listing nodes (which the driver's namespace Role cannot do).
+  Microbenchmark numbers can differ between slices, so this is recorded in
+  provenance.json next to the image digests.
+
+  Args:
+    pod_list: `kubectl get pods` items of one JobSet.
+
+  Returns:
+    Sorted distinct prefixes of the pods' `spec.nodeName`.
+  """
+  pools = set()
+  for pod in pod_list:
+    node = pod.get("spec", {}).get("nodeName") or ""
+    if node:
+      pools.add(node.rsplit("-", 1)[0] if "-" in node else node)
+  return sorted(pools)
+
+
+def record_pod_placement(
+    wl: ActiveWorkload, pod_list: list[dict[str, Any]]
+) -> bool:
+  """Records the node pools of `pod_list` in `wl.provenance`; True if changed."""
+  pools = pod_node_pools(pod_list)
+  if not pools:
+    return False
+  known = set(str(wl.provenance.get("node_pools", "")).split(","))
+  merged = ",".join(sorted(set(pools) | (known - {""})))
+  if merged == wl.provenance.get("node_pools"):
+    return False
+  wl.provenance["node_pools"] = merged
+  return True
+
+
 def update_workload_states(
     active_workloads: dict[str, ActiveWorkload],
     jobsets_data: dict[str, dict[str, Any]],
@@ -986,6 +1024,7 @@ def update_workload_states(
     any_running = False
     if pod_list:
       record_pod_digests(wl, pod_list)
+      record_pod_placement(wl, pod_list)
       for pod in pod_list:
         status_dict = pod.get("status", {})
         phase = status_dict.get("phase", "")

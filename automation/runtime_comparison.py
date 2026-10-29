@@ -77,7 +77,19 @@ COMPARISON_HEADERS: tuple[str, ...] = (
     "throughput",
     "xprof",
     "vs_mcjax",
+    "slice",
 )
+
+
+def _tpu_slice(row: Mapping[str, Any]) -> str:
+  """Returns the TPU node pool the row ran on (short form), if recorded.
+
+  `node_pools` lists the pools of all pods; the Pathways head runs on a CPU
+  pool, so the TPU slice is the entry that is not a `default-pool`.
+  """
+  pools = [p for p in str(row.get("node_pools", "")).split(",") if p]
+  tpu = [p for p in pools if "default-pool" not in p] or pools
+  return ", ".join(p.replace("gke-", "", 1) for p in tpu)
 
 
 @dataclasses.dataclass
@@ -205,6 +217,7 @@ def build_comparison(
             "throughput": _throughput(row),
             "xprof": _xprof_status(row),
             "vs_mcjax": _ratio(row, baseline),
+            "slice": _tpu_slice(row),
         })
     tables.append(
         ComparisonTable(

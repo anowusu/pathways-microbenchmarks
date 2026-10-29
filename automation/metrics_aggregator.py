@@ -64,7 +64,7 @@ def verify_gcs_bucket_accessible(gcs_bucket: str) -> None:
 
 # Runtime discriminator columns added to every row (see runtimes.py); the
 # Pathways provenance ones are only filled for Pathways runtimes, the client
-# image digest whenever the pods reported it.
+# image digest and node pools whenever the pods reported them.
 RUNTIME_COLUMNS: tuple[str, ...] = (
     "runtime",
     "pathways_server_image",
@@ -72,6 +72,7 @@ RUNTIME_COLUMNS: tuple[str, ...] = (
     "pathways_server_digest",
     "pathways_proxy_digest",
     "client_image_digest",
+    "node_pools",
     "git_commit",
 )
 # Cross-workload discriminator and metric columns placed before the remaining

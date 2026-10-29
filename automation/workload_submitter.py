@@ -196,6 +196,32 @@ class ActiveWorkload:
   # nothing from it, but their names must stay short); McJAX JobSets use
   # `generateName`.
   fixed_name: bool = False
+  # Name the workload was prepared under (McJAX JobSets get a generated
+  # suffix on creation); retries are queued under it again.
+  base_name: str = ""
+  # 1 for the first submission; retries of failed or timed-out workloads
+  # increment it and keep the earlier errors.
+  attempt: int = 1
+  previous_errors: list[str] = dataclasses.field(default_factory=list)
+
+  def retry_copy(self) -> "ActiveWorkload":
+    """Returns a fresh copy of this workload for its next attempt."""
+    error = f"attempt {self.attempt}: {self.status}: {self.error_message}"
+    return dataclasses.replace(
+        self,
+        workload_name=self.base_name or self.workload_name,
+        start_time=time.time(),
+        status="SUBMITTED",
+        ready_pods=0,
+        successful_pods=0,
+        failed_pods=0,
+        duration_seconds=0.0,
+        error_message=None,
+        terminal=False,
+        cleaned_up=False,
+        attempt=self.attempt + 1,
+        previous_errors=self.previous_errors + [error],
+    )
 
 
 def _package_relative_path(config_file: pathlib.Path) -> str:
@@ -1083,6 +1109,9 @@ class WorkloadManager:
   # Pod PriorityClass of every benchmark pod ("" = none). On shared Kueue
   # clusters it decides who preempts whom.
   pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS
+  # How many times a failed or timed-out workload is resubmitted (its JobSet
+  # is deleted first; results of the last attempt count).
+  retries: int = 0
 
   active_workloads: dict[str, ActiveWorkload] = dataclasses.field(
       default_factory=dict
@@ -1234,12 +1263,49 @@ class WorkloadManager:
             runtime=runtime.name,
             provenance=provenance,
             fixed_name=runtime.is_pathways,
+            base_name=workload_name,
         )
 
     return dry_run_results
 
   def _in_flight(self) -> int:
     return sum(1 for wl in self.active_workloads.values() if not wl.terminal)
+
+  def _requeue_failed(self) -> int:
+    """Resubmits workloads that failed or timed out, up to `retries` times.
+
+    The failed JobSet is deleted (a Pathways JobSet is recreated under the
+    same name) and a fresh copy of the workload joins `pending_workloads`;
+    only the last attempt is reported.
+
+    Returns:
+      The number of workloads queued for another attempt.
+    """
+    requeued = 0
+    for name, wl in list(self.active_workloads.items()):
+      if (
+          not wl.terminal
+          or wl.status not in ("FAILED", "TIMEOUT")
+          or wl.attempt > self.retries
+      ):
+        continue
+      logging.warning(
+          "Workload [%s] (%s, %s) %s on attempt %d/%d: %s. Resubmitting...",
+          name,
+          wl.config_name,
+          wl.runtime,
+          wl.status,
+          wl.attempt,
+          self.retries + 1,
+          wl.error_message,
+      )
+      if not wl.cleaned_up:
+        wl.cleaned_up = delete_jobset(name, self.namespace)
+      del self.active_workloads[name]
+      retry = wl.retry_copy()
+      self.pending_workloads[retry.workload_name] = retry
+      requeued += 1
+    return requeued
 
   def _submit_one(self, name: str, wl: ActiveWorkload) -> None:
     """Creates one JobSet and moves it from pending to active."""
@@ -1305,9 +1371,9 @@ class WorkloadManager:
     waves = 1
     if self.max_parallel and timeout_seconds:
       total = len(self.active_workloads) + len(self.pending_workloads)
-      waves = max(1, -(-total // self.max_parallel))
+      waves = max(1, -(-(total * (1 + self.retries)) // self.max_parallel))
     # Each workload gets `timeout_minutes` from its own submission; the whole
-    # run gets one timeout per wave of submissions.
+    # run gets one timeout per wave of submissions (retries included).
     deadline = self.start_time + (
         timeout_seconds * waves if timeout_seconds else float("inf")
     )
@@ -1377,6 +1443,9 @@ class WorkloadManager:
           pods_data,
           timeout_minutes=self.timeout_minutes,
       )
+      if self.retries and self._requeue_failed():
+        _clear_dashboard()
+        all_done = False
       if self.pending_workloads:
         if self._submit_pending():
           all_done = False
@@ -1426,6 +1495,13 @@ class WorkloadManager:
     for wl in list(self.active_workloads.values()) + list(
         self.pending_workloads.values()
     ):
+      error_message = wl.error_message
+      if not wl.terminal and not error_message:
+        error_message = "Not finished before the overall deadline."
+      if wl.previous_errors and error_message:
+        error_message = "; ".join(
+            wl.previous_errors + [f"attempt {wl.attempt}: {error_message}"]
+        )
       results.append(
           BenchmarkResult(
               workload_name=wl.workload_name,
@@ -1435,7 +1511,7 @@ class WorkloadManager:
               status=wl.status if wl.terminal else "TIMEOUT",
               duration_seconds=wl.duration_seconds,
               gcs_artifact_path=wl.gcs_output_dir,
-              error_message=wl.error_message,
+              error_message=error_message,
               runtime=wl.runtime,
               provenance=wl.provenance,
           )
@@ -1499,6 +1575,7 @@ def submit_workloads(
     runtimes: Optional[Sequence[runtimes_lib.Runtime]] = None,
     max_parallel: Optional[int] = None,
     pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS,
+    retries: int = utils.DEFAULT_RETRIES,
 ) -> list[BenchmarkResult]:
   """Prepares and submits all targeted configs on every runtime in parallel."""
   manager = WorkloadManager(
@@ -1521,6 +1598,7 @@ def submit_workloads(
       runtimes=list(runtimes or [runtimes_lib.MCJAX]),
       max_parallel=max_parallel,
       pod_priority_class=pod_priority_class,
+      retries=retries,
   )
   return manager.run(config_files)
 
@@ -1584,6 +1662,7 @@ def main(argv: Sequence[str]) -> None:
       runtimes=runtimes,
       max_parallel=args.max_parallel,
       pod_priority_class=args.pod_priority_class,
+      retries=args.retries,
   )
 
 

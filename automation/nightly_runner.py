@@ -162,6 +162,7 @@ def run_pipeline(
     max_parallel: Optional[int] = None,
     skip_cluster_credentials: bool = False,
     pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS,
+    retries: int = utils.DEFAULT_RETRIES,
 ) -> list[workload_submitter.BenchmarkResult]:
   """Executes the benchmark automation pipeline (Workload Submission, Metrics Aggregation, Report Generation)."""
   # Resolve the selection first so flag misuse fails before any GCS or
@@ -253,6 +254,7 @@ def run_pipeline(
       runtimes=runtimes,
       max_parallel=max_parallel,
       pod_priority_class=pod_priority_class,
+      retries=retries,
   )
 
   # Ingest summary.csv metrics; a JobSet that exited 0 without producing any
@@ -431,6 +433,7 @@ def main(argv: Sequence[str]) -> None:
       max_parallel=args.max_parallel,
       skip_cluster_credentials=args.skip_cluster_credentials,
       pod_priority_class=args.pod_priority_class,
+      retries=args.retries,
   )
 
 

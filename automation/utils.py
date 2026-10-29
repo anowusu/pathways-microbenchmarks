@@ -36,6 +36,8 @@ DEFAULT_QUEUE = os.environ.get("QUEUE", "multislice-queue")
 DEFAULT_PRIORITY = os.environ.get("PRIORITY", "medium")
 # Pod PriorityClass of the benchmark pods; "" leaves it unset.
 DEFAULT_POD_PRIORITY_CLASS = os.environ.get("POD_PRIORITY_CLASS", "")
+# Resubmissions of a failed or timed-out workload.
+DEFAULT_RETRIES = int(os.environ.get("RETRIES", "0"))
 DEFAULT_DOCKER_IMAGE = os.environ.get(
     "DOCKER_IMAGE", "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
 )
@@ -561,6 +563,15 @@ def add_workload_args(
       help=(
           "Maximum JobSets in flight at once; the rest are submitted as"
           " others finish (default: submit all at once)."
+      ),
+  )
+  parser.add_argument(
+      "--retries",
+      type=int,
+      default=DEFAULT_RETRIES,
+      help=(
+          "How many times a failed or timed-out JobSet is deleted and"
+          f" resubmitted; only the last attempt counts (default: {DEFAULT_RETRIES})."
       ),
   )
   parser.add_argument(

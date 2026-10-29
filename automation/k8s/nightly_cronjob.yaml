@@ -60,7 +60,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
-      # 15 JobSets, at most 3 in flight, 25 min each: well under 5 h.
+      # 15 JobSets, at most 3 in flight, 25 min each, one retry: under 5 h.
       activeDeadlineSeconds: 18000
       template:
         metadata:
@@ -95,6 +95,8 @@ spec:
                 - --runtimes=mcjax,louhi,rapid
                 - --max-parallel=3
                 - --timeout-minutes=25
+                # A preempted or hung JobSet is deleted and resubmitted once.
+                - --retries=1
                 - --git-repo=https://github.com/anowusu/pathways-microbenchmarks.git
                 - --git-branch=nightly
                 - --docker-image=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest

@@ -26,6 +26,7 @@ from automation import bq_writer
 from automation import metrics_aggregator
 from automation import runtime_comparison
 from automation import runtimes
+from automation import utils
 from automation import workload_submitter
 import yaml
 
@@ -230,6 +231,92 @@ class WorkloadNamingTest(parameterized.TestCase):
     self.assertEqual(pod_spec(with_prio)["priorityClassName"], "medium")
     self.assertEqual(pod_spec(with_prio)["restartPolicy"], "Never")
     self.assertTrue(pod_spec(with_prio)["hostNetwork"])
+
+
+class RetryTest(absltest.TestCase):
+  """A failed or timed-out workload is deleted and resubmitted `retries` times."""
+
+  _FAILED = {"tpums-rapid-all-gather": {"status": {"conditions": [
+      {"type": "Failed", "status": "True", "reason": "Preempted", "message": "rm crashed"}]}}}
+  _COMPLETED = {"tpums-rapid-all-gather": {"status": {"conditions": [
+      {"type": "Completed", "status": "True"}]}}}
+
+  def _manager(self, retries):
+    wl = workload_submitter.ActiveWorkload(
+        workload_name="tpums-rapid-all-gather",
+        config_name="all_gather",
+        config_rel_path="configs/v5e/4x8/all_gather.yaml",
+        topology="4x8",
+        manifest_yaml="kind: JobSet",
+        gcs_output_dir="gs://b/2026-10-29/rapid/all_gather",
+        start_time=0.0,
+        total_pods=9,
+        runtime="rapid",
+        fixed_name=True,
+        base_name="tpums-rapid-all-gather",
+    )
+    return workload_submitter.WorkloadManager(
+        timeout_minutes=1,
+        poll_interval_seconds=1,
+        tick_interval_seconds=0,
+        cleanup=True,
+        retries=retries,
+        pending_workloads={wl.workload_name: wl},
+    )
+
+  @mock.patch.object(workload_submitter, "upload_provenance")
+  @mock.patch.object(workload_submitter, "_delete_existing_jobset")
+  @mock.patch.object(workload_submitter, "delete_jobset", return_value=True)
+  @mock.patch.object(workload_submitter, "apply_jobset", return_value="tpums-rapid-all-gather")
+  @mock.patch.object(workload_submitter, "fetch_namespace_pods", return_value={})
+  @mock.patch.object(workload_submitter, "fetch_namespace_jobsets")
+  def test_failed_workload_is_resubmitted_once(
+      self, mock_jobsets, mock_pods, mock_apply, mock_delete, mock_delete_existing, mock_upload
+  ):
+    del mock_pods, mock_upload  # Unused.
+    mock_jobsets.side_effect = [self._FAILED, self._COMPLETED, self._COMPLETED]
+    manager = self._manager(retries=1)
+    manager.submit_all()
+    results = manager.poll()
+
+    self.assertLen(results, 1)
+    self.assertEqual(results[0].status, "SUCCESS")
+    self.assertIsNone(results[0].error_message)
+    self.assertEqual(mock_apply.call_count, 2)
+    # The failed JobSet is deleted before the retry recreates the fixed name.
+    mock_delete.assert_any_call("tpums-rapid-all-gather", utils.DEFAULT_NAMESPACE)
+    self.assertEqual(mock_delete_existing.call_count, 2)
+
+  @mock.patch.object(workload_submitter, "upload_provenance")
+  @mock.patch.object(workload_submitter, "_delete_existing_jobset")
+  @mock.patch.object(workload_submitter, "delete_jobset", return_value=True)
+  @mock.patch.object(workload_submitter, "apply_jobset", return_value="tpums-rapid-all-gather")
+  @mock.patch.object(workload_submitter, "fetch_namespace_pods", return_value={})
+  @mock.patch.object(workload_submitter, "fetch_namespace_jobsets")
+  def test_errors_of_every_attempt_are_reported(
+      self, mock_jobsets, mock_pods, mock_apply, mock_delete, mock_delete_existing, mock_upload
+  ):
+    del mock_pods, mock_delete, mock_delete_existing, mock_upload  # Unused.
+    mock_jobsets.return_value = self._FAILED
+    manager = self._manager(retries=1)
+    manager.submit_all()
+    results = manager.poll()
+
+    self.assertLen(results, 1)
+    self.assertEqual(results[0].status, "FAILED")
+    self.assertEqual(mock_apply.call_count, 2)
+    self.assertRegex(
+        results[0].error_message,
+        r"attempt 1: FAILED: .*rm crashed; attempt 2: .*rm crashed",
+    )
+
+  def test_no_retry_by_default(self):
+    manager = self._manager(retries=0)
+    wl = manager.pending_workloads.pop("tpums-rapid-all-gather")
+    wl.status, wl.terminal, wl.error_message = "TIMEOUT", True, "slow"
+    manager.active_workloads = {wl.workload_name: wl}
+    self.assertEqual(manager._requeue_failed(), 0)
+    self.assertIn(wl.workload_name, manager.active_workloads)
 
 
 class RuntimeComparisonTest(absltest.TestCase):

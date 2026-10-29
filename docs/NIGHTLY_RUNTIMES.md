@@ -151,6 +151,16 @@ header's "JobSets: x/y" still describes the run that produced it.
   gives each JobSet `--timeout-minutes`).
 * **Names.** Pathways JobSets are named `tpums-<runtime>-<config>` (≤ 22
   characters) and recreated if one exists; McJAX JobSets use `generateName`.
+* **Preemption and retries.** Higher-priority jobs can still preempt a
+  `medium` benchmark. When Kueue re-admits a preempted Pathways JobSet, the
+  new resource manager registers with the old, still-terminating head (same
+  DNS name), its watchdog kills it, and the JAX client hangs on the dead
+  backend. The driver fails such a JobSet as soon as a head container has
+  restarted (instead of waiting for `--timeout-minutes`) and, with
+  `--retries 1`, deletes it and submits the config again under a new name
+  (`tpums-rapid-all-gat-r2`), so the retry never shares a DNS name with the
+  previous attempt. Only the last attempt is reported; the earlier error is
+  kept in the result's message.
 
 ## Migration path to uBench / Helm
 

@@ -75,6 +75,15 @@ spec:
             - name: driver
               image: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:latest
               imagePullPolicy: Always
+              env:
+                # Use the cl/1010067962 Louhi image (PJRT profiler registered)
+                # until cl/1010067962 rolls out to cloud-pathways:latest.
+                - name: TPUMS_LOUHI_SERVER_IMAGE
+                  value: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server
+                - name: TPUMS_LOUHI_PROXY_IMAGE
+                  value: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/proxy_server
+                - name: TPUMS_LOUHI_VERSION
+                  value: cl-1010067962
               args:
                 - --cluster=pw-scale-test-v5e-32
                 - --project=cloud-tpu-multipod-dev
@@ -102,6 +111,7 @@ spec:
                 - --docker-image=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
                 - --gcs-bucket=gs://cloud-pathways-staging/tpums-nightly
                 - --bq-table=cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks
+                - --upload-trace
                 - --skip-cluster-credentials
                 - --cleanup
               resources:

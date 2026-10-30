@@ -241,9 +241,10 @@ class NightlyRunnerTest(parameterized.TestCase):
     # The execution summary still describes this run only.
     self.assertLen(self.mock_gen_report.call_args.kwargs["results"], 1)
     mock_write.assert_called_once()
-    # The dashboard is built from the day's rows and this run's JobSets.
+    # The dashboard is built from the day's rows and the day's JobSets.
     self.mock_dashboard.assert_called_once()
-    self.assertLen(self.mock_dashboard.call_args.args[3], 1)
+    self.assertLen(self.mock_dashboard.call_args.args[3], 2)
+    self.assertEqual(self.mock_dashboard.call_args.args[3][0].duration_seconds, 1.0)
 
   @mock.patch.object(nightly_runner, "run_pipeline")
   def test_main_forwards_accelerator_and_selection_flags(self, mock_run):

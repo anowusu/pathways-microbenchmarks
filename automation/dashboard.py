@@ -186,6 +186,31 @@ def _tpu_slice(node_pools: Any) -> str:
   return ", ".join(p.replace("gke-", "", 1) for p in pools)
 
 
+def list_report_dates(gcs_bucket: str) -> list[str]:
+  """Lists available `<YYYY-MM-DD>` dashboard dates under `<bucket>/reports/`."""
+  pattern = utils.format_gcs_uri(gcs_bucket, "reports", f"*_{DASHBOARD_FILE}")
+  try:
+    proc = subprocess.run(
+        ["gcloud", "storage", "ls", pattern],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        timeout=utils.CLI_TIMEOUT_SECONDS,
+    )
+  except (OSError, subprocess.TimeoutExpired):
+    return []
+  if proc.returncode != 0:
+    return []
+  dates = set()
+  suffix = f"_{DASHBOARD_FILE}"
+  for line in proc.stdout.splitlines():
+    name = line.strip().rsplit("/", 1)[-1]
+    if name.endswith(suffix) and name != f"latest_{DASHBOARD_FILE}":
+      dates.add(name[: -len(suffix)])
+  return sorted(dates, reverse=True)
+
+
 def render_dashboard(
     categorized_metrics: Mapping[str, Sequence[Mapping[str, Any]]],
     results: Sequence[Any],
@@ -193,6 +218,7 @@ def render_dashboard(
     date_str: str,
     cluster: str = "",
     report_uri: str = "",
+    history_dates: Sequence[str] = (),
 ) -> str:
   """Returns the dashboard HTML for one night.
 
@@ -203,6 +229,7 @@ def render_dashboard(
     date_str: The night's date, shown in the title.
     cluster: Cluster name, shown in the subtitle.
     report_uri: Where the Markdown/HTML report lives, linked in the subtitle.
+    history_dates: Optional list of `<YYYY-MM-DD>` dates to link in the header.
   """
   rows = []
   for category_rows in categorized_metrics.values():
@@ -221,12 +248,23 @@ def render_dashboard(
         "slice": _tpu_slice(prov.get("node_pools")),
     })
   runtimes = sorted({str(r.get("runtime") or "mcjax") for r in rows})
+  all_dates = sorted({date_str, *history_dates}, reverse=True)[:14]
+  history_html = ""
+  if len(all_dates) > 1:
+    links = [
+        f'<a href="{d}_{DASHBOARD_FILE}"><b>{d}</b></a>'
+        if d == date_str
+        else f'<a href="{d}_{DASHBOARD_FILE}">{d}</a>'
+        for d in all_dates
+    ]
+    history_html = "runs: " + " · ".join(links)
   subtitle = " · ".join(
       s for s in (
           cluster and f"cluster {cluster}",
           f"{len(jobsets)} JobSet(s)",
           f"runtimes: {', '.join(runtimes)}" if runtimes else "",
           report_uri and f'report: <a href="{report_uri}">{report_uri}</a>',
+          history_html,
       ) if s
   )
   return (
@@ -252,7 +290,15 @@ def publish_dashboard(gcs_bucket: str, date_str: str, html: str) -> list[str]:
   for uri in targets:
     try:
       proc = subprocess.run(
-          ["gcloud", "storage", "cp", "--content-type=text/html", "-", uri],
+          [
+              "gcloud",
+              "storage",
+              "cp",
+              "--content-type=text/html",
+              "--cache-control=no-cache,max-age=0",
+              "-",
+              uri,
+          ],
           input=html,
           capture_output=True,
           text=True,

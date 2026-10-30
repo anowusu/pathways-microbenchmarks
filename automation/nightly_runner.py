@@ -63,7 +63,14 @@ def publish_report_copies(
     for name in (f"{date_str}.{ext}", f"latest.{ext}"):
       target = utils.format_gcs_uri(gcs_bucket, REPORTS_SUBDIR, name)
       proc = subprocess.run(
-          ["gcloud", "storage", "cp", local_path, target],
+          [
+              "gcloud",
+              "storage",
+              "cp",
+              "--cache-control=no-cache,max-age=0",
+              local_path,
+              target,
+          ],
           capture_output=True,
           text=True,
           check=False,
@@ -91,14 +98,14 @@ def publish_dashboard(
 ) -> list[str]:
   """Renders and uploads the interactive dashboard; failures are logged."""
   try:
+    history_dates = dashboard.list_report_dates(gcs_bucket)
     html = dashboard.render_dashboard(
         categorized_metrics,
         results,
         date_str=date_str,
         cluster=cluster,
-        report_uri=utils.format_gcs_uri(
-            gcs_bucket, REPORTS_SUBDIR, f"{date_str}.html"
-        ),
+        report_uri=f"{date_str}.html",
+        history_dates=history_dates,
     )
     return dashboard.publish_dashboard(gcs_bucket, date_str, html)
   except Exception:  # pylint: disable=broad-exception-caught
@@ -190,7 +197,17 @@ def day_results(
   )
   if not entries:
     return list(run_results)
-  return [_result_from_gcs_entry(e) for e in entries]
+  by_key = {(r.runtime, r.config_name): r for r in run_results}
+  merged = []
+  for e in entries:
+    r = _result_from_gcs_entry(e)
+    live = by_key.get((r.runtime, r.config_name))
+    if live is not None:
+      r.duration_seconds = live.duration_seconds
+      r.status = live.status
+      r.error_message = live.error_message
+    merged.append(r)
+  return merged
 
 
 def run_pipeline(
@@ -397,7 +414,7 @@ def run_pipeline(
         gcs_bucket,
         date_str,
         categorized_metrics,
-        results,
+        aggregated_results,
         cluster=cluster,
     )
 

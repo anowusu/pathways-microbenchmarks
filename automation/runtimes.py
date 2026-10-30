@@ -28,6 +28,7 @@ from collections.abc import Iterable, Sequence
 import dataclasses
 import json
 import logging
+import os
 import subprocess
 from typing import Any, Optional
 
@@ -71,8 +72,15 @@ class Runtime:
 MCJAX = Runtime(name="mcjax")
 LOUHI = Runtime(
     name="louhi",
-    pathways_server_image=f"{_PATHWAYS_REGISTRY}/cloud-pathways/server",
-    pathways_proxy_image=f"{_PATHWAYS_REGISTRY}/cloud-pathways/proxy_server",
+    pathways_server_image=os.environ.get(
+        "TPUMS_LOUHI_SERVER_IMAGE",
+        f"{_PATHWAYS_REGISTRY}/cloud-pathways/server",
+    ),
+    pathways_proxy_image=os.environ.get(
+        "TPUMS_LOUHI_PROXY_IMAGE",
+        f"{_PATHWAYS_REGISTRY}/cloud-pathways/proxy_server",
+    ),
+    pathways_version=os.environ.get("TPUMS_LOUHI_VERSION", "latest"),
 )
 RAPID = Runtime(
     name="rapid",

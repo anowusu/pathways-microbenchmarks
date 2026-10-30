@@ -534,10 +534,13 @@ class DashboardTest(absltest.TestCase):
                             _row("louhi", "", "9.0")], "gemm": [], "hbm": []}
     html = dashboard.render_dashboard(
         rows, self._results(), date_str="2026-10-29", cluster="pw-scale-test-v5e-32",
-        report_uri="gs://b/reports/2026-10-29.html",
+        report_uri="2026-10-29.html", history_dates=["2026-10-30", "2026-10-29"],
     )
     self.assertIn("TPUMS nightly — 2026-10-29", html)
     self.assertIn("pw-scale-test-v5e-32", html)
+    self.assertIn('<a href="2026-10-29.html">2026-10-29.html</a>', html)
+    self.assertIn('<a href="2026-10-30_dashboard.html">2026-10-30</a>', html)
+    self.assertIn("<b>2026-10-29</b>", html)
     embedded = json.loads(html.split("const ROWS = ")[1].split(";\n")[0])
     self.assertLen(embedded, 3)
     self.assertEqual({r["runtime"] for r in embedded}, {"mcjax", "rapid", "louhi"})
@@ -551,6 +554,22 @@ class DashboardTest(absltest.TestCase):
     self.assertNotIn("<link ", html)
 
   @mock.patch.object(subprocess, "run")
+  def test_list_report_dates_extracts_sorted_dates(self, mock_run):
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0,
+        stdout=(
+            "gs://b/tpums-nightly/reports/2026-10-29_dashboard.html\n"
+            "gs://b/tpums-nightly/reports/2026-10-30_dashboard.html\n"
+            "gs://b/tpums-nightly/reports/latest_dashboard.html\n"
+        ),
+        stderr="",
+    )
+    self.assertEqual(
+        dashboard.list_report_dates("gs://b/tpums-nightly"),
+        ["2026-10-30", "2026-10-29"],
+    )
+
+  @mock.patch.object(subprocess, "run")
   def test_publish_dashboard_writes_day_and_latest(self, mock_run):
     mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     written = dashboard.publish_dashboard("gs://b/tpums-nightly", "2026-10-29", "<html>")
@@ -560,7 +579,16 @@ class DashboardTest(absltest.TestCase):
         "gs://b/tpums-nightly/reports/latest_dashboard.html",
     ])
     for call in mock_run.call_args_list:
-      self.assertEqual(call.args[0][:4], ["gcloud", "storage", "cp", "--content-type=text/html"])
+      self.assertEqual(
+          call.args[0][:5],
+          [
+              "gcloud",
+              "storage",
+              "cp",
+              "--content-type=text/html",
+              "--cache-control=no-cache,max-age=0",
+          ],
+      )
       self.assertEqual(call.kwargs["input"], "<html>")
 
 

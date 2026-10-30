@@ -51,12 +51,12 @@ metadata:
   name: tpums-nightly
   namespace: default
 spec:
-  # 09:00 UTC = 02:00 PDT / 01:00 PST.
-  schedule: "0 9 * * *"
+  # Hourly at minute 0 (UTC).
+  schedule: "0 * * * *"
   timeZone: "Etc/UTC"
   concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 7
-  failedJobsHistoryLimit: 7
+  successfulJobsHistoryLimit: 24
+  failedJobsHistoryLimit: 12
   jobTemplate:
     spec:
       backoffLimit: 0

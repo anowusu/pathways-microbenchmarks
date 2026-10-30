@@ -95,9 +95,13 @@ def publish_dashboard(
     results: Sequence[workload_submitter.BenchmarkResult],
     *,
     cluster: str = "",
+    run_id: str = "",
 ) -> list[str]:
   """Renders and uploads the interactive dashboard; failures are logged."""
   try:
+    history = dashboard.update_history(
+        gcs_bucket, run_id or date_str, categorized_metrics
+    )
     history_dates = dashboard.list_report_dates(gcs_bucket)
     html = dashboard.render_dashboard(
         categorized_metrics,
@@ -106,6 +110,7 @@ def publish_dashboard(
         cluster=cluster,
         report_uri=f"{date_str}.html",
         history_dates=history_dates,
+        history=history,
     )
     return dashboard.publish_dashboard(gcs_bucket, date_str, html)
   except Exception:  # pylint: disable=broad-exception-caught
@@ -416,6 +421,7 @@ def run_pipeline(
         categorized_metrics,
         aggregated_results,
         cluster=cluster,
+        run_id=now_utc.strftime("%Y-%m-%d %H:%M UTC"),
     )
 
   if bq_table and not dry_run:

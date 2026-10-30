@@ -549,9 +549,26 @@ class DashboardTest(absltest.TestCase):
     self.assertEqual([j["status"] for j in jobsets], ["SUCCESS", "TIMEOUT"])
     self.assertEqual(jobsets[0]["slice"], "tpu-abcd1234")
     self.assertIn("Exceeded timeout", jobsets[1]["error"])
+    history = json.loads(html.split("const HISTORY = ")[1].split(";\n")[0])
+    self.assertLen(history, 1)
+    self.assertEqual(history[0]["run_id"], "2026-10-29")
     # Self-contained: no external scripts or styles.
     self.assertNotIn("<script src=", html)
     self.assertNotIn("<link ", html)
+
+  @mock.patch.object(subprocess, "run")
+  def test_update_history_appends_and_sorts_snapshots(self, mock_run):
+    existing = [{"run_id": "2026-10-29 21:55 UTC", "rows": [_row("mcjax", "1.0", "2.0")]}]
+    mock_run.side_effect = [
+        subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(existing), stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+    ]
+    updated = dashboard.update_history(
+        "gs://b/tpums-nightly",
+        "2026-10-30 01:00 UTC",
+        {"collectives": [_row("rapid", "1.1", "8.0")]},
+    )
+    self.assertEqual([h["run_id"] for h in updated], ["2026-10-29 21:55 UTC", "2026-10-30 01:00 UTC"])
 
   @mock.patch.object(subprocess, "run")
   def test_list_report_dates_extracts_sorted_dates(self, mock_run):

@@ -23,6 +23,8 @@ from typing import Any
 from automation import utils
 
 DASHBOARD_FILE = "dashboard.html"
+HISTORY_FILE = "history.json"
+MAX_HISTORY_RUNS = 168  # 7 days of hourly runs
 
 _TEMPLATE = r"""<!DOCTYPE html>
 <html>
@@ -55,10 +57,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(510px, 1fr)); gap: 14px; }
   .panel { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px 10px; background: var(--card); }
   .panel-wide { grid-column: 1 / -1; }
-  .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+  .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 2px; flex-wrap: wrap; }
   .panel-title { font-size: 15px; font-weight: 650; }
   .dir { font-size: 11.5px; font-weight: 600; color: var(--good); }
-  .panel-sub { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+  .panel-sub { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .case-pills { display: inline-flex; background: var(--mutedbg); border: 1px solid var(--border); border-radius: 7px; padding: 2px; gap: 2px; }
+  .case-pills button { border: 0; background: transparent; color: var(--muted); font: 600 11px/1 inherit; padding: 4px 8px; border-radius: 5px; cursor: pointer; }
+  .case-pills button.active { background: var(--card); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.1); }
   .tip { position: fixed; pointer-events: none; z-index: 50; max-width: 360px; font-size: 12px; line-height: 1.4; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; box-shadow: 0 6px 18px rgba(0,0,0,.22); display: none; white-space: pre-line; }
   svg text { font-family: inherit; }
   .axis { stroke: var(--border); stroke-width: 1; }
@@ -103,6 +108,16 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div id="charts" class="grid2"></div>
   </div>
 
+  <div class="card" id="history-card">
+    <div class="top" style="margin-bottom:12px">
+      <div>
+        <h2>Historical Trend Over Time (Hourly Runs)</h2>
+        <div class="muted" id="history-sub">Tracks each runtime across hourly runs using the Metric and Statistic selected above. Use the size pills on each chart to switch workload size.</div>
+      </div>
+    </div>
+    <div id="history-charts" class="grid2"></div>
+  </div>
+
   <div class="card">
     <details id="health-details">
       <summary id="health-summary">Run health &amp; build provenance</summary>
@@ -116,6 +131,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const ROWS = __ROWS__;
 const JOBSETS = __JOBSETS__;
+const HISTORY = __HISTORY__;
 const COLORS = { mcjax: "#3b82f6", louhi: "#f59e0b", rapid: "#10b981" };
 const PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#8b5cf6", "#ef4444", "#06b6d4"];
 const RT_META = {
@@ -438,9 +454,161 @@ function renderPanel(bench, mode) {
   const dirLabel = mode === "thr" ? "↑ Higher is better" : "↓ Lower is better";
   const wrap = document.createElement("div");
   wrap.className = isWide ? "panel panel-wide" : "panel";
-  wrap.innerHTML = `<div class="panel-head"><span class="panel-title">${meta.title}</span><span class="dir">${dirLabel}</span></div><div class="panel-sub">${meta.what ? meta.what + " · " : ""}<b>${unitLabel}</b></div>`;
+  wrap.innerHTML = `<div class="panel-head"><span class="panel-title">${meta.title}</span><span class="dir">${dirLabel}</span></div><div class="panel-sub"><span>${meta.what ? meta.what + " · " : ""}<b>${unitLabel}</b></span></div>`;
   wrap.appendChild(svg);
   return wrap;
+}
+
+const selectedCaseByBench = {};
+
+function renderHistoryPanel(bench, mode, runs) {
+  const st = STAT_LABEL[currentStat];
+  const allBenchRows = [];
+  runs.forEach(snap => (snap.rows || []).filter(r => r.benchmark === bench).forEach(r => allBenchRows.push(r)));
+  const meta = BENCH_META[bench] || {
+    title: bench.replace(/Benchmark$/, ""),
+    what: "",
+    unit: (allBenchRows.map(thr).find(Boolean) || { u: "Speed" }).u,
+    axisTitle: "Workload size",
+  };
+  const keys = [...new Set(allBenchRows.map(caseKey))];
+  const labels = {};
+  const sortNum = {};
+  allBenchRows.forEach(r => {
+    const k = caseKey(r);
+    labels[k] = caseLabels(r);
+    sortNum[k] = Number(r.shard_size_mib || r.data_size_mib || r.m || r.matrix_dim || r.num_elements || 0);
+  });
+  keys.sort((a, b) => sortNum[a] - sortNum[b]);
+  if (!keys.length) return document.createElement("div");
+  if (!selectedCaseByBench[bench] || !keys.includes(selectedCaseByBench[bench])) {
+    selectedCaseByBench[bench] = keys[keys.length - 1];
+  }
+  const activeKey = selectedCaseByBench[bench];
+
+  const isWide = BENCH.length % 2 === 1 && BENCH.indexOf(bench) === BENCH.length - 1;
+  const W = isWide ? 1060 : 540, H = 228, left = 44, right = 78, top = 18, bottom = 42;
+  const svg = svgEl("svg", { width: "100%", viewBox: `0 0 ${W} ${H}` });
+
+  const valOf = r => {
+    if (mode === "thr") { const t = thrAt(r); return t ? t.v : null; }
+    if (mode === "dev") return devTime(r);
+    return wallTime(r);
+  };
+
+  let max = 0;
+  runs.forEach(snap => {
+    (snap.rows || []).forEach(r => {
+      if (r.benchmark === bench && caseKey(r) === activeKey) {
+        const v = valOf(r);
+        if (v != null && v > max) max = v;
+      }
+    });
+  });
+  if (!max) max = 1;
+  const step = niceStep(max, 4);
+  const yMax = step * 4;
+  const yv = v => top + (H - top - bottom) * (1 - v / yMax);
+  const plotW = W - left - right;
+  const xv = i => runs.length === 1 ? left + plotW / 2 : left + (plotW * i) / (runs.length - 1);
+
+  for (let t = 0; t <= 4; t++) {
+    const v = step * t;
+    svg.appendChild(svgEl("line", { x1: left, x2: W - right, y1: yv(v), y2: yv(v), class: "grid" }));
+    svg.appendChild(svgEl("text", { x: left - 6, y: yv(v) + 4, class: "lbl", "text-anchor": "end" }, fmtTick(v)));
+  }
+  svg.appendChild(svgEl("line", { x1: left, x2: W - right, y1: yv(0), y2: yv(0), class: "axis" }));
+
+  const fmtRunLbl = id => String(id || "").replace(/^20\d\d-/, "").replace(/ UTC$/, "").replace("T", " ").replace(/Z$/, "");
+  const stride = Math.max(1, Math.ceil(runs.length / (isWide ? 10 : 5)));
+  runs.forEach((snap, i) => {
+    const x = xv(i);
+    svg.appendChild(svgEl("line", { x1: x, x2: x, y1: top, y2: yv(0), class: "grid", "stroke-opacity": 0.25 }));
+    if (i % stride === 0 || i === runs.length - 1) {
+      svg.appendChild(svgEl("text", { x, y: H - 20, class: "lbl-x", "text-anchor": "middle", style: "font-size:10.5px" }, fmtRunLbl(snap.run_id)));
+    }
+  });
+  svg.appendChild(svgEl("text", { x: left + plotW / 2, y: H - 4, class: "lbl", "text-anchor": "middle" }, "Run timestamp (UTC)"));
+
+  const endLabels = [];
+  RT.forEach(rt => {
+    const pts = [];
+    runs.forEach((snap, i) => {
+      const r = (snap.rows || []).find(q => (q.runtime || "mcjax") === rt && q.benchmark === bench && caseKey(q) === activeKey);
+      if (!r) return;
+      const v = valOf(r);
+      if (v == null) return;
+      pts.push({ x: xv(i), y: yv(v), v, r, runId: snap.run_id });
+    });
+    if (pts.length >= 2) {
+      const d = pts.map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+      svg.appendChild(svgEl("path", { d, fill: "none", stroke: COLOR[rt], "stroke-width": 2.2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+    }
+    pts.forEach(p => {
+      const r = p.r;
+      const dev = devTime(r), wall = wallTime(r), t = thrAt(r);
+      const overhead = (dev != null && wall != null && wall > dev) ? (wall - dev) : null;
+      const devStats = num(r.xprof_p50_ms) != null
+        ? `\nTPU chip (p50 / p90 / mean): <b>${sig5(r.xprof_p50_ms)}</b> / <b>${sig5(r.xprof_p90_ms)}</b> / <b>${sig5(r.xprof_avg_ms ?? r.xprof_p50_ms)} ms</b>`
+        : "\nTPU chip time: not captured";
+      const wallStats = num(r.wall_clock_p50_ms) != null
+        ? `\nClient wall (p50 / p90 / mean): <b>${sig5(r.wall_clock_p50_ms)}</b> / <b>${sig5(r.wall_clock_p90_ms)}</b> / <b>${sig5(r.wall_clock_avg_ms)} ms</b>`
+        : "";
+      const tt = `<b>${meta.title.split(" · ")[0]} · ${rtName(rt)}</b>\nRun: <b>${p.runId}</b> · Size: ${labels[activeKey].main}` +
+        (t ? `\nHardware speed (${st}): <b>${sig5(t.v)} ${t.u}</b>` : "") +
+        devStats + wallStats +
+        (overhead != null ? `\nWall − Chip (${st}): <b>+${sig5(overhead)} ms</b>` : "") +
+        (slice(r) ? `\nTPU slice: ${slice(r)}` : "");
+      svg.appendChild(hover(svgEl("circle", { cx: p.x, cy: p.y, r: 4.5, fill: COLOR[rt], stroke: "var(--card)", "stroke-width": 1.5 }), tt));
+    });
+    if (pts.length) {
+      const last = pts[pts.length - 1];
+      endLabels.push({ rt, x: last.x, rawY: last.y, y: Math.max(12, Math.min(yv(0) - 4, last.y)), text: fmtVal(last.v) });
+    }
+  });
+
+  endLabels.sort((a, b) => a.y - b.y);
+  for (let k = 1; k < endLabels.length; k++) {
+    if (endLabels[k].y - endLabels[k - 1].y < 12) endLabels[k].y = endLabels[k - 1].y + 12;
+  }
+  endLabels.forEach(lbl => {
+    svg.appendChild(svgEl("line", { x1: lbl.x + 6, y1: lbl.rawY, x2: lbl.x + 13, y2: lbl.y, stroke: COLOR[lbl.rt], "stroke-width": 1.2, "stroke-opacity": 0.75 }));
+    svg.appendChild(svgEl("text", { x: lbl.x + 16, y: lbl.y + 3.5, class: "val-lbl", fill: COLOR[lbl.rt] }, lbl.text));
+  });
+
+  const unitLabel = mode === "thr" ? `${meta.unit} (${st})` : mode === "dev" ? `TPU chip time (ms, ${st})` : `End-to-end wall clock (ms, ${st})`;
+  const dirLabel = mode === "thr" ? "↑ Higher is better" : "↓ Lower is better";
+  const wrap = document.createElement("div");
+  wrap.className = isWide ? "panel panel-wide" : "panel";
+  const head = document.createElement("div");
+  head.className = "panel-head";
+  head.innerHTML = `<span class="panel-title">${meta.title.split(" · ")[0]} · ${labels[activeKey].main}</span>`;
+  const pills = document.createElement("div");
+  pills.className = "case-pills";
+  keys.forEach(k => {
+    const btn = document.createElement("button");
+    btn.className = k === activeKey ? "active" : "";
+    btn.textContent = labels[k].main;
+    btn.onclick = () => { selectedCaseByBench[bench] = k; renderHistory(); };
+    pills.appendChild(btn);
+  });
+  head.appendChild(pills);
+  wrap.appendChild(head);
+  const sub = document.createElement("div");
+  sub.className = "panel-sub";
+  sub.innerHTML = `<span><b>${unitLabel}</b></span><span class="dir">${dirLabel}</span>`;
+  wrap.appendChild(sub);
+  wrap.appendChild(svg);
+  return wrap;
+}
+
+function renderHistory() {
+  const runs = (HISTORY && HISTORY.length) ? HISTORY : [{ run_id: "Current", rows: ROWS }];
+  document.getElementById("history-sub").textContent =
+    `Showing ${runs.length} recorded run${runs.length === 1 ? "" : "s"} (${runs[0].run_id} → ${runs[runs.length - 1].run_id}) using the Metric and Statistic selected above. Click a size pill on any chart to switch workload size.`;
+  const container = document.getElementById("history-charts");
+  container.innerHTML = "";
+  for (const b of BENCH) container.appendChild(renderHistoryPanel(b, currentMode, runs));
 }
 
 function refreshAll() {
@@ -455,6 +623,7 @@ function refreshAll() {
   const container = document.getElementById("charts");
   container.innerHTML = "";
   for (const b of BENCH) container.appendChild(renderPanel(b, currentMode));
+  renderHistory();
 }
 function setMode(m) { currentMode = m; refreshAll(); }
 function setStat(s) { currentStat = s; refreshAll(); }
@@ -508,6 +677,83 @@ def list_report_dates(gcs_bucket: str) -> list[str]:
   return sorted(dates, reverse=True)
 
 
+def extract_rows(
+    categorized_metrics: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+  """Extracts compact dashboard rows from `categorized_metrics`."""
+  rows = []
+  for category_rows in categorized_metrics.values():
+    for row in category_rows:
+      rows.append({k: row[k] for k in _ROW_KEYS if row.get(k) not in (None, "")})
+  return rows
+
+
+def fetch_history(gcs_bucket: str) -> list[dict[str, Any]]:
+  """Fetches the historical run snapshots from `<bucket>/reports/history.json`."""
+  if not gcs_bucket:
+    return []
+  uri = utils.format_gcs_uri(gcs_bucket, "reports", HISTORY_FILE)
+  try:
+    proc = subprocess.run(
+        ["gcloud", "storage", "cat", uri],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        timeout=utils.CLI_TIMEOUT_SECONDS,
+    )
+  except (OSError, subprocess.TimeoutExpired):
+    return []
+  if proc.returncode != 0 or not proc.stdout.strip():
+    return []
+  try:
+    data = json.loads(proc.stdout)
+  except json.JSONDecodeError:
+    return []
+  return data if isinstance(data, list) else []
+
+
+def update_history(
+    gcs_bucket: str,
+    run_id: str,
+    categorized_metrics: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    max_runs: int = MAX_HISTORY_RUNS,
+) -> list[dict[str, Any]]:
+  """Upserts `run_id`'s rows into `<bucket>/reports/history.json` and returns the history."""
+  rows = extract_rows(categorized_metrics)
+  history = [
+      h for h in fetch_history(gcs_bucket)
+      if isinstance(h, dict) and h.get("run_id") != run_id and h.get("rows")
+  ]
+  if rows:
+    history.append({"run_id": run_id, "rows": rows})
+  history.sort(key=lambda h: str(h.get("run_id", "")))
+  history = history[-max_runs:]
+  if gcs_bucket and history:
+    uri = utils.format_gcs_uri(gcs_bucket, "reports", HISTORY_FILE)
+    try:
+      subprocess.run(
+          [
+              "gcloud",
+              "storage",
+              "cp",
+              "--content-type=application/json",
+              "--cache-control=no-cache,max-age=0",
+              "-",
+              uri,
+          ],
+          input=json.dumps(history),
+          capture_output=True,
+          text=True,
+          check=False,
+          timeout=utils.CLI_TIMEOUT_SECONDS,
+      )
+    except (OSError, subprocess.TimeoutExpired):
+      logging.warning("Timed out uploading %s.", uri)
+  return history
+
+
 def render_dashboard(
     categorized_metrics: Mapping[str, Sequence[Mapping[str, Any]]],
     results: Sequence[Any],
@@ -516,6 +762,7 @@ def render_dashboard(
     cluster: str = "",
     report_uri: str = "",
     history_dates: Sequence[str] = (),
+    history: Sequence[Mapping[str, Any]] = (),
 ) -> str:
   """Returns the dashboard HTML for one night.
 
@@ -527,11 +774,9 @@ def render_dashboard(
     cluster: Cluster name, shown in the subtitle.
     report_uri: Where the Markdown/HTML report lives, linked in the subtitle.
     history_dates: Optional list of `<YYYY-MM-DD>` dates to link in the header.
+    history: Optional list of `{"run_id": ..., "rows": [...]}` historical snapshots.
   """
-  rows = []
-  for category_rows in categorized_metrics.values():
-    for row in category_rows:
-      rows.append({k: row[k] for k in _ROW_KEYS if row.get(k) not in (None, "")})
+  rows = extract_rows(categorized_metrics)
   jobsets = []
   for r in results:
     prov = getattr(r, "provenance", None) or {}
@@ -564,11 +809,13 @@ def render_dashboard(
           history_html,
       ) if s
   )
+  history_payload = list(history) if history else ([{"run_id": date_str, "rows": rows}] if rows else [])
   return (
       _TEMPLATE.replace("__TITLE__", f"TPUMS nightly — {date_str}")
       .replace("__SUBTITLE__", subtitle)
       .replace("__ROWS__", json.dumps(rows))
       .replace("__JOBSETS__", json.dumps(jobsets))
+      .replace("__HISTORY__", json.dumps(history_payload))
   )
 
 

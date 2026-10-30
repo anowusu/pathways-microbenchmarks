@@ -54,6 +54,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; }
   .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(510px, 1fr)); gap: 14px; }
   .panel { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px 10px; background: var(--card); }
+  .panel-wide { grid-column: 1 / -1; }
   .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
   .panel-title { font-size: 15px; font-weight: 650; }
   .dir { font-size: 11.5px; font-weight: 600; color: var(--good); }
@@ -162,6 +163,14 @@ const CASE_KEYS = ["matrix_dim", "num_elements", "data_size_mib", "m", "k", "n",
 const num = v => (v === "" || v == null) ? null : Number(v);
 const sig5 = v => (v == null || v === "" || Number.isNaN(Number(v))) ? "–" : Number(v).toPrecision(5);
 const fmtVal = v => (v == null || Number.isNaN(Number(v))) ? "" : (Number(v) === 0 ? "0" : Number(v).toPrecision(5));
+const fmtTick = v => (v == null || Number.isNaN(Number(v))) ? "" : (Number(v) === 0 ? "0" : Number(Number(v).toPrecision(6)).toString());
+const niceStep = (rawMax, nTicks = 4) => {
+  const target = ((rawMax || 1) * 1.14) / nTicks;
+  const mag = Math.pow(10, Math.floor(Math.log10(target)));
+  const norm = target / mag;
+  const nice = norm <= 1 ? 1 : norm <= 1.25 ? 1.25 : norm <= 1.5 ? 1.5 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 3 ? 3 : norm <= 4 ? 4 : norm <= 5 ? 5 : norm <= 6 ? 6 : norm <= 8 ? 8 : 10;
+  return nice * mag;
+};
 const fmtMib = mib => { const n = Number(mib); if (!n) return ""; return n >= 1024 ? `${(n / 1024).toFixed(n % 1024 ? 1 : 0)} GB` : `${n.toFixed(0)} MB`; };
 const fmtK = n => { const v = Number(n); return v >= 1024 && v % 1024 === 0 ? `${v / 1024}K` : String(n); };
 const slice = r => (r.node_pools || "").split(",").filter(p => p.startsWith("gke-tpu-")).map(p => p.replace("gke-", "")).join(", ");
@@ -173,10 +182,9 @@ const caseLabels = r => {
     return { main: `${fmtK(r.m)}×${fmtK(r.k)}×${fmtK(r.n)}`, sub: ops };
   }
   if (r.shard_size_mib) {
-    const perChip = fmtMib(r.shard_size_mib);
-    return { main: `${perChip}/chip`, sub: r.matrix_dim ? `dim ${Number(r.matrix_dim).toLocaleString()}` : "" };
+    return { main: fmtMib(r.shard_size_mib), sub: r.matrix_dim ? `dim ${Number(r.matrix_dim).toLocaleString()}` : "" };
   }
-  if (r.data_size_mib) return { main: fmtMib(r.data_size_mib), sub: "per chip" };
+  if (r.data_size_mib) return { main: fmtMib(r.data_size_mib), sub: "" };
   if (r.matrix_dim) return { main: `dim ${Number(r.matrix_dim).toLocaleString()}`, sub: "" };
   if (r.num_elements) return { main: `${Number(r.num_elements).toLocaleString()} elems`, sub: "" };
   return { main: CASE_KEYS.filter(k => r[k]).map(k => `${k}=${r[k]}`).join(" ") || "(all)", sub: "" };
@@ -336,7 +344,9 @@ function renderPanel(bench, mode) {
   });
   keys.sort((a, b) => sortNum[a] - sortNum[b]);
 
-  const W = 540, H = 240, left = 54, right = 12, top = 22, bottom = 52;
+  const isWide = keys.length >= 4 || (BENCH.length % 2 === 1 && BENCH.indexOf(bench) === BENCH.length - 1);
+  const hasSub = keys.some(k => labels[k].sub);
+  const W = isWide ? 1060 : 540, H = hasSub ? 248 : 234, left = 42, right = 12, top = 20, bottom = hasSub ? 56 : 42;
   const svg = svgEl("svg", { width: "100%", viewBox: `0 0 ${W} ${H}` });
   const defs = svgEl("defs");
   RT.forEach(rt => {
@@ -358,31 +368,35 @@ function renderPanel(bench, mode) {
     if (v != null && v > max) max = v;
   });
   if (!max) max = 1;
-  const yMax = max * 1.18;
+  const step = niceStep(max, 4);
+  const yMax = step * 4;
   const yv = v => top + (H - top - bottom) * (1 - v / yMax);
   const gw = (W - left - right) / Math.max(keys.length, 1);
 
   for (let t = 0; t <= 4; t++) {
-    const v = (max * t) / 4;
+    const v = step * t;
     svg.appendChild(svgEl("line", { x1: left, x2: W - right, y1: yv(v), y2: yv(v), class: "grid" }));
-    svg.appendChild(svgEl("text", { x: left - 6, y: yv(v) + 4, class: "lbl", "text-anchor": "end" }, fmtVal(v)));
+    svg.appendChild(svgEl("text", { x: left - 6, y: yv(v) + 4, class: "lbl", "text-anchor": "end" }, fmtTick(v)));
   }
   svg.appendChild(svgEl("line", { x1: left, x2: W - right, y1: yv(0), y2: yv(0), class: "axis" }));
 
   keys.forEach((key, i) => {
     const gx = left + i * gw;
     const cx = gx + gw / 2;
-    svg.appendChild(svgEl("text", { x: cx, y: H - 30, class: "lbl-x", "text-anchor": "middle" }, labels[key].main));
+    svg.appendChild(svgEl("text", { x: cx, y: H - (hasSub ? 34 : 22), class: "lbl-x", "text-anchor": "middle" }, labels[key].main));
     if (labels[key].sub) {
-      svg.appendChild(svgEl("text", { x: cx, y: H - 17, class: "lbl-xsub", "text-anchor": "middle" }, labels[key].sub));
+      svg.appendChild(svgEl("text", { x: cx, y: H - 20, class: "lbl-xsub", "text-anchor": "middle" }, labels[key].sub));
     }
-    const pad = Math.min(12, gw * 0.10);
-    const bw = (gw - pad * 2) / Math.max(RT.length, 1);
+    const maxGroupW = Math.min(gw - 20, RT.length * 64);
+    const pad = (gw - maxGroupW) / 2;
+    const bw = maxGroupW / Math.max(RT.length, 1);
+    const barGap = Math.min(8, Math.max(4, bw * 0.14));
     RT.forEach((rt, j) => {
       const r = rows.find(q => (q.runtime || "mcjax") === rt && caseKey(q) === key);
       if (!r) return;
       const bx = gx + pad + j * bw;
-      const barW = Math.max(bw - 4, 4);
+      const barW = Math.max(bw - barGap, 4);
+      const xBar = bx + barGap / 2;
       const v = valOf(r);
       if (v == null) return;
       const dev = devTime(r), wall = wallTime(r), t = thrAt(r);
@@ -409,21 +423,21 @@ function renderPanel(bench, mode) {
         (slice(r) ? `\nTPU slice: ${slice(r)}` : "");
 
       if (mode === "wall" && dev != null && wall != null && wall > dev) {
-        svg.appendChild(hover(svgEl("rect", { x: bx + 2, y: yv(wall), width: barW, height: yv(dev) - yv(wall), fill: `url(#stripe-${bench}-${rt})`, stroke: COLOR[rt], "stroke-width": 1, rx: 3 }), tt));
-        svg.appendChild(hover(svgEl("rect", { x: bx + 2, y: yv(dev), width: barW, height: yv(0) - yv(dev), fill: COLOR[rt], rx: 2 }), tt));
+        svg.appendChild(hover(svgEl("rect", { x: xBar, y: yv(wall), width: barW, height: yv(dev) - yv(wall), fill: `url(#stripe-${bench}-${rt})`, stroke: COLOR[rt], "stroke-width": 1, rx: 3 }), tt));
+        svg.appendChild(hover(svgEl("rect", { x: xBar, y: yv(dev), width: barW, height: yv(0) - yv(dev), fill: COLOR[rt], rx: 2 }), tt));
       } else {
         const isWallFallback = (mode === "thr" && t && t.wall) || (mode === "dev" && dev == null);
-        svg.appendChild(hover(svgEl("rect", { x: bx + 2, y: yv(v), width: barW, height: Math.max(yv(0) - yv(v), 2), fill: isWallFallback ? `url(#stripe-${bench}-${rt})` : COLOR[rt], stroke: COLOR[rt], "stroke-width": isWallFallback ? 1 : 0, rx: 3 }), tt));
+        svg.appendChild(hover(svgEl("rect", { x: xBar, y: yv(v), width: barW, height: Math.max(yv(0) - yv(v), 2), fill: isWallFallback ? `url(#stripe-${bench}-${rt})` : COLOR[rt], stroke: COLOR[rt], "stroke-width": isWallFallback ? 1 : 0, rx: 3 }), tt));
       }
-      svg.appendChild(svgEl("text", { x: bx + 2 + barW / 2, y: Math.max(yv(v) - 5, 11), class: "val-lbl", "text-anchor": "middle" }, fmtVal(v)));
+      svg.appendChild(svgEl("text", { x: xBar + barW / 2, y: Math.max(yv(v) - 6, 11), class: "val-lbl", "text-anchor": "middle" }, fmtVal(v)));
     });
   });
-  svg.appendChild(svgEl("text", { x: left + (W - left - right) / 2, y: H - 3, class: "lbl", "text-anchor": "middle" }, meta.axisTitle));
+  svg.appendChild(svgEl("text", { x: left + (W - left - right) / 2, y: H - 4, class: "lbl", "text-anchor": "middle" }, meta.axisTitle));
 
   const unitLabel = mode === "thr" ? `${meta.unit} (${st})` : mode === "dev" ? `TPU chip time (ms, ${st})` : `Client wall-clock (${st}) = solid chip + striped host/proxy gap (ms)`;
   const dirLabel = mode === "thr" ? "↑ Higher is better" : "↓ Lower is better";
   const wrap = document.createElement("div");
-  wrap.className = "panel";
+  wrap.className = isWide ? "panel panel-wide" : "panel";
   wrap.innerHTML = `<div class="panel-head"><span class="panel-title">${meta.title}</span><span class="dir">${dirLabel}</span></div><div class="panel-sub">${meta.what ? meta.what + " · " : ""}<b>${unitLabel}</b></div>`;
   wrap.appendChild(svg);
   return wrap;

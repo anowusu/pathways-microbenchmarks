@@ -30,138 +30,359 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <title>__TITLE__</title>
 <style>
-  :root { color-scheme: light dark; --bg: #f6f8fa; --card: #fff; --fg: #1f2328; --muted: #656d76; --border: #d0d7de; --mutedbg: #eaeef2; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --card: #161b22; --fg: #e6edf3; --muted: #8d96a0; --border: #30363d; --mutedbg: #21262d; } }
-  body { margin: 0; padding: 20px; background: var(--bg); color: var(--fg); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  .wrap { max-width: 1200px; margin: 0 auto; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
-  h1 { font-size: 20px; margin: 0 0 6px; } h2 { font-size: 16px; margin: 0 0 4px; }
+  :root { color-scheme: light dark; --bg: #f8fafc; --card: #ffffff; --fg: #0f172a; --muted: #64748b; --border: #e2e8f0; --mutedbg: #f1f5f9; --accent: #2563eb; --good: #16a34a; --goodbg: #dcfce7; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0f17; --card: #151c28; --fg: #f1f5f9; --muted: #94a3b8; --border: #263142; --mutedbg: #1e293b; --accent: #3b82f6; --good: #4ade80; --goodbg: #14532d; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; margin-bottom: 16px; }
+  .top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0; }
   .muted { color: var(--muted); font-size: 13px; }
-  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr)); gap: 14px; margin-top: 12px; }
-  .panel { border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
-  .legend span { display: inline-flex; align-items: center; margin-right: 16px; } .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; }
-  .tip { position: fixed; pointer-events: none; z-index: 50; max-width: 380px; font-size: 12px; line-height: 1.35; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; box-shadow: 0 4px 14px rgba(0,0,0,.25); display: none; white-space: pre-line; }
-  svg text { font-family: inherit; } .axis { stroke: var(--border); } .grid { stroke: var(--border); stroke-opacity: .6; stroke-dasharray: 2 3; }
-  .lbl { fill: var(--muted); font-size: 11px; } .lbl2 { fill: var(--fg); font-size: 12px; font-weight: 600; }
-  a { color: inherit; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 16px; }
+  .kpi { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--mutedbg); }
+  .kpi-head { display: flex; align-items: center; justify-content: space-between; font-weight: 600; font-size: 13px; }
+  .kpi-val { font-size: 20px; font-weight: 700; margin: 4px 0 2px; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--goodbg); color: var(--good); }
+  .bar-ctrl { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .seg { display: inline-flex; background: var(--mutedbg); border: 1px solid var(--border); border-radius: 10px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; background: transparent; color: var(--muted); font: 600 12.5px/1 inherit; padding: 8px 12px; border-radius: 7px; cursor: pointer; transition: all .12s; }
+  .seg button.active { background: var(--card); color: var(--fg); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; font-size: 13px; font-weight: 500; }
+  .legend span { display: inline-flex; align-items: center; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(510px, 1fr)); gap: 14px; }
+  .panel { border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px 10px; background: var(--card); }
+  .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+  .panel-title { font-size: 15px; font-weight: 650; }
+  .dir { font-size: 11.5px; font-weight: 600; color: var(--good); }
+  .panel-sub { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+  .tip { position: fixed; pointer-events: none; z-index: 50; max-width: 360px; font-size: 12px; line-height: 1.4; background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; box-shadow: 0 6px 18px rgba(0,0,0,.22); display: none; white-space: pre-line; }
+  svg text { font-family: inherit; }
+  .axis { stroke: var(--border); stroke-width: 1; }
+  .grid { stroke: var(--border); stroke-opacity: .55; stroke-dasharray: 2 3; }
+  .lbl { fill: var(--muted); font-size: 11px; }
+  .lbl-x { fill: var(--fg); font-size: 11.5px; font-weight: 600; }
+  .lbl-xsub { fill: var(--muted); font-size: 10.5px; }
+  .val-lbl { fill: var(--fg); font-size: 11px; font-weight: 600; }
+  details summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); user-select: none; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
 </style>
 </head>
 <body><div class="wrap">
   <div class="card">
-    <h1>__TITLE__</h1>
-    <div class="muted">__SUBTITLE__</div>
-    <div class="legend" id="legend" style="margin-top:10px"></div>
-    <div class="muted" id="prov" style="margin-top:6px"></div>
+    <div class="top">
+      <div>
+        <h1>__TITLE__</h1>
+        <div class="muted">__SUBTITLE__</div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div class="kpis" id="kpis"></div>
   </div>
+
   <div class="card">
-    <h2>JobSets of this run</h2>
-    <div class="muted">One cell per JobSet (hover for duration, slice and errors).</div>
-    <div id="runs" style="margin-top:10px"></div>
+    <div class="bar-ctrl">
+      <div class="seg" role="tablist">
+        <button id="btn-thr" class="active" onclick="setMode('thr')">Hardware Speed (GB/s · TFLOP/s)</button>
+        <button id="btn-dev" onclick="setMode('dev')">TPU Chip Time (ms)</button>
+        <button id="btn-wall" onclick="setMode('wall')">Total Wait Time = Chip + Proxy (ms)</button>
+      </div>
+      <div class="muted" id="mode-hint"></div>
+    </div>
+    <div id="charts" class="grid2"></div>
   </div>
+
   <div class="card">
-    <h2>Step time per case (p50, ms)</h2>
-    <div class="muted">Solid bar = XProf device time; hollow bar = wall clock seen by the JAX client. Runtimes without device traces show wall clock only. Hover for p90 / std / throughput / slice.</div>
-    <div id="bars" class="grid2"></div>
-  </div>
-  <div class="card">
-    <h2>Pathways / McJAX ratio per case</h2>
-    <div class="muted">1.00 = same as McJAX. Device-time ratios isolate the TPU work; wall-clock ratios include the proxy round trip.</div>
-    <div id="heat" style="margin-top:10px;overflow-x:auto"></div>
-  </div>
-  <div class="card">
-    <h2>Throughput per case</h2>
-    <div class="muted">Achieved bandwidth (GB/s per chip or device) or TFLOP/s per device; from device time where available, else wall clock (hatched).</div>
-    <div id="thr" class="grid2"></div>
+    <details id="health-details">
+      <summary id="health-summary">Run health &amp; build provenance</summary>
+      <div class="muted" style="margin-top:8px">One cell per JobSet (hover for duration, TPU slice, and errors).</div>
+      <div id="runs" style="margin-top:8px;overflow-x:auto"></div>
+      <div class="muted" id="prov" style="margin-top:8px;font-size:12px"></div>
+    </details>
   </div>
 </div>
 <div class="tip" id="tip"></div>
 <script>
 const ROWS = __ROWS__;
 const JOBSETS = __JOBSETS__;
-const COLORS = ["#4285F4", "#F9AB00", "#34A853", "#A142F4", "#EA4335", "#00ACC1"];
+const COLORS = { mcjax: "#3b82f6", louhi: "#f59e0b", rapid: "#10b981" };
+const PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#8b5cf6", "#ef4444", "#06b6d4"];
+const RT_META = {
+  mcjax: { name: "McJAX (Baseline)", desc: "Runs directly on TPU hosts" },
+  louhi: { name: "Louhi (OSS Pathways)", desc: "Open-source Pathways container" },
+  rapid: { name: "Rapid (Internal Pathways)", desc: "Internal release Pathways container" },
+};
+const BENCH_META = {
+  AllGatherBenchmark: {
+    title: "All-Gather · Combine data across 32 chips",
+    what: "Each chip shares its piece so all 32 chips get the full tensor",
+    unit: "Network speed (GB/s per chip)",
+    axisTitle: "Data size per chip (bfloat16)",
+  },
+  AllReduceBenchmark: {
+    title: "All-Reduce · Sum data across 32 chips",
+    what: "Adds tensors across all 32 chips and returns the sum to every chip",
+    unit: "Network speed (GB/s per chip)",
+    axisTitle: "Data size per chip (bfloat16)",
+  },
+  AllToAllBenchmark: {
+    title: "All-to-All · Shuffle data across 32 chips",
+    what: "Every chip sends a distinct slice to every other chip",
+    unit: "Network speed (GB/s per chip)",
+    axisTitle: "Data size per chip (bfloat16)",
+  },
+  GeneralizedGemmBenchmark: {
+    title: "Matrix Multiply (GEMM) · Compute speed",
+    what: "Multiplies two bfloat16 matrices on each TPU chip's matrix unit (MXU)",
+    unit: "Compute speed (TFLOP/s per chip)",
+    axisTitle: "Matrix shape (M × K × N)",
+  },
+  HBMBandwidthBenchmark: {
+    title: "HBM Memory Copy · On-chip memory speed",
+    what: "Copies a large tensor inside each chip's High-Bandwidth Memory",
+    unit: "Memory speed (GB/s per chip)",
+    axisTitle: "Buffer size copied per chip",
+  },
+};
 const RT = [...new Set(ROWS.map(r => r.runtime || "mcjax"))].sort((a, b) => (a === "mcjax" ? -1 : b === "mcjax" ? 1 : a.localeCompare(b)));
-const COLOR = Object.fromEntries(RT.map((rt, i) => [rt, COLORS[i % COLORS.length]]));
-const BENCH = [...new Set(ROWS.map(r => r.benchmark))].map(b => [b, b.replace(/Benchmark$/, "")]);
+const COLOR = Object.fromEntries(RT.map((rt, i) => [rt, COLORS[rt] || PALETTE[i % PALETTE.length]]));
+const rtName = rt => (RT_META[rt] && RT_META[rt].name) || rt;
+const BENCH = [...new Set(ROWS.map(r => r.benchmark))];
 const CASE_KEYS = ["matrix_dim", "num_elements", "data_size_mib", "m", "k", "n", "shard_size_mib", "dtype", "in_dtype", "out_dtype", "src_device_index", "dst_device_index", "mesh_shape", "sharding_strategy"];
 const num = v => (v === "" || v == null) ? null : Number(v);
-const f = (v, d = 2) => (v == null || Number.isNaN(Number(v))) ? "–" : Number(v).toFixed(d);
+const f = (v, d = 1) => (v == null || Number.isNaN(Number(v))) ? "–" : Number(v).toFixed(d);
+const fmtVal = v => v == null ? "" : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+const fmtMib = mib => { const n = Number(mib); if (!n) return ""; return n >= 1024 ? `${(n / 1024).toFixed(n % 1024 ? 1 : 0)} GB` : `${n.toFixed(0)} MB`; };
+const fmtK = n => { const v = Number(n); return v >= 1024 && v % 1024 === 0 ? `${v / 1024}K` : String(n); };
 const slice = r => (r.node_pools || "").split(",").filter(p => p.startsWith("gke-tpu-")).map(p => p.replace("gke-", "")).join(", ");
-const caseLabel = r => { if (r.m && r.k && r.n) return `m=${r.m} k=${r.k} n=${r.n}`; if (r.matrix_dim) return `dim ${r.matrix_dim}`; if (r.data_size_mib) return `${Number(r.data_size_mib)} MiB`; if (r.num_elements) return `${r.num_elements} elems`; return CASE_KEYS.filter(k => r[k]).map(k => `${k}=${r[k]}`).join(" ") || "(all)"; };
 const caseKey = r => CASE_KEYS.map(k => r[k] || "").join("|");
-const thr = r => { const pairs = [["xprof_tflops_per_device","TFLOP/s/dev",false],["xprof_tflops_per_chip","TFLOP/s/chip",false],["wall_clock_tflops_per_device","TFLOP/s/dev (wall)",true],["wall_clock_tflops_per_chip","TFLOP/s/chip (wall)",true],["xprof_bandwidth_per_chip_gb_s","GB/s/chip",false],["xprof_bandwidth_per_device_gb_s","GB/s/dev",false],["wall_clock_bandwidth_per_chip_gb_s","GB/s/chip (wall)",true],["wall_clock_bandwidth_per_device_gb_s","GB/s/dev (wall)",true]]; for (const [k,u,w] of pairs) if (num(r[k]) != null) return {v: num(r[k]), u, wall: w}; return null; };
+const caseLabels = r => {
+  if (r.m && r.k && r.n) {
+    const gflops = (2 * Number(r.m) * Number(r.k) * Number(r.n)) / 1e9;
+    const ops = gflops >= 1000 ? `${(gflops / 1000).toFixed(1)} TFLOP` : `${gflops.toFixed(0)} GFLOP`;
+    return { main: `${fmtK(r.m)}×${fmtK(r.k)}×${fmtK(r.n)}`, sub: ops };
+  }
+  if (r.shard_size_mib) {
+    const perChip = fmtMib(r.shard_size_mib);
+    return { main: `${perChip}/chip`, sub: r.matrix_dim ? `dim ${Number(r.matrix_dim).toLocaleString()}` : "" };
+  }
+  if (r.data_size_mib) return { main: fmtMib(r.data_size_mib), sub: "per chip" };
+  if (r.matrix_dim) return { main: `dim ${Number(r.matrix_dim).toLocaleString()}`, sub: "" };
+  if (r.num_elements) return { main: `${Number(r.num_elements).toLocaleString()} elems`, sub: "" };
+  return { main: CASE_KEYS.filter(k => r[k]).map(k => `${k}=${r[k]}`).join(" ") || "(all)", sub: "" };
+};
+const thr = r => {
+  const pairs = [
+    ["xprof_tflops_per_device", "TFLOP/s", false],
+    ["xprof_tflops_per_chip", "TFLOP/s", false],
+    ["xprof_bandwidth_per_chip_gb_s", "GB/s", false],
+    ["xprof_bandwidth_per_device_gb_s", "GB/s", false],
+    ["wall_clock_tflops_per_device", "TFLOP/s (wall)", true],
+    ["wall_clock_tflops_per_chip", "TFLOP/s (wall)", true],
+    ["wall_clock_bandwidth_per_chip_gb_s", "GB/s (wall)", true],
+    ["wall_clock_bandwidth_per_device_gb_s", "GB/s (wall)", true],
+  ];
+  for (const [k, u, w] of pairs) if (num(r[k]) != null) return { v: num(r[k]), u, wall: w };
+  return null;
+};
 const tip = document.getElementById("tip");
-const showTip = (e, html) => { tip.innerHTML = html; tip.style.display = "block"; tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 400) + "px"; tip.style.top = (e.clientY + 14) + "px"; };
+const showTip = (e, html) => { tip.innerHTML = html; tip.style.display = "block"; tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 380) + "px"; tip.style.top = (e.clientY + 14) + "px"; };
 const hideTip = () => tip.style.display = "none";
 const svgEl = (tag, attrs = {}, text) => { const el = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const k in attrs) el.setAttribute(k, attrs[k]); if (text != null) el.textContent = text; return el; };
 const hover = (el, text) => { el.addEventListener("mousemove", e => showTip(e, text)); el.addEventListener("mouseleave", hideTip); return el; };
 
-document.getElementById("legend").innerHTML = RT.map(rt => `<span><span class="sw" style="background:${COLOR[rt]}"></span>${rt}</span>`).join("");
-(function(){ const by = {}; for (const r of ROWS) if (!by[r.runtime || "mcjax"]) by[r.runtime || "mcjax"] = r;
-  const parts = RT.filter(rt => by[rt]).map(rt => { const r = by[rt]; const d = (r.pathways_server_digest || "").replace("sha256:", "").slice(0, 12); const c = (r.client_image_digest || "").replace("sha256:", "").slice(0, 12); return `<b>${rt}</b>: ${[c && "client " + c, d && "server " + d, r.git_commit && "commit " + String(r.git_commit).slice(0, 12)].filter(Boolean).join(", ")}`; });
+// Legend
+document.getElementById("legend").innerHTML = RT.map(rt => `<span><span class="sw" style="background:${COLOR[rt]}"></span>${rtName(rt)}</span>`).join("");
+
+// Top KPI summary cards
+(function(){
+  const baseByKey = {};
+  ROWS.filter(r => (r.runtime || "mcjax") === "mcjax").forEach(r => baseByKey[r.benchmark + "|" + caseKey(r)] = r);
+  const kpiEl = document.getElementById("kpis");
+  RT.forEach(rt => {
+    const rtRows = ROWS.filter(r => (r.runtime || "mcjax") === rt);
+    const meta = RT_META[rt] || { name: rt, desc: "" };
+    let headline = `${rtRows.length} cases measured`;
+    let badgeText = "Baseline";
+    let sub = meta.desc;
+    if (rt !== "mcjax") {
+      const ratios = [];
+      const overheads = [];
+      rtRows.forEach(r => {
+        const b = baseByKey[r.benchmark + "|" + caseKey(r)];
+        const tRt = thr(r), tBase = b ? thr(b) : null;
+        if (tRt && tBase && tBase.v > 0 && !tRt.wall && !tBase.wall) ratios.push(tRt.v / tBase.v);
+        const dev = num(r.xprof_p50_ms), wall = num(r.wall_clock_p50_ms);
+        if (dev != null && wall != null && wall >= dev) overheads.push(wall - dev);
+      });
+      if (ratios.length) {
+        const geo = Math.exp(ratios.reduce((s, x) => s + Math.log(x), 0) / ratios.length);
+        const pct = Math.round(geo * 100);
+        headline = `${pct}% of McJAX chip speed`;
+        badgeText = pct >= 97 ? "Matches McJAX" : `${pct}% vs McJAX`;
+      }
+      if (overheads.length) {
+        overheads.sort((a, b) => a - b);
+        const med = overheads[Math.floor(overheads.length / 2)];
+        sub = `${meta.desc} · +${med.toFixed(1)} ms proxy hop`;
+      }
+    }
+    const div = document.createElement("div");
+    div.className = "kpi";
+    div.innerHTML = `<div class="kpi-head"><span><span class="sw" style="background:${COLOR[rt]}"></span>${meta.name}</span><span class="badge">${badgeText}</span></div><div class="kpi-val">${headline}</div><div class="muted" style="font-size:12px">${sub}</div>`;
+    kpiEl.appendChild(div);
+  });
+})();
+
+// Provenance & JobSet strip
+(function(){
+  const by = {};
+  for (const r of ROWS) if (!by[r.runtime || "mcjax"]) by[r.runtime || "mcjax"] = r;
+  const parts = RT.filter(rt => by[rt]).map(rt => {
+    const r = by[rt];
+    const d = (r.pathways_server_digest || "").replace("sha256:", "").slice(0, 12);
+    const c = (r.client_image_digest || "").replace("sha256:", "").slice(0, 12);
+    return `<b>${rt}</b>: ${[c && "client " + c, d && "server " + d, r.git_commit && "commit " + String(r.git_commit).slice(0, 12)].filter(Boolean).join(", ")}`;
+  });
   const slices = [...new Set(ROWS.map(slice).filter(Boolean))];
-  document.getElementById("prov").innerHTML = parts.join(" · ") + (slices.length ? ". Slices: " + slices.join(", ") : ""); })();
+  document.getElementById("prov").innerHTML = parts.join(" · ") + (slices.length ? ". Slices: " + slices.join(", ") : "");
 
-// JobSet strip
-(function(){ const el = document.getElementById("runs"); if (!JOBSETS.length) { el.innerHTML = '<span class="muted">(no JobSets in this run)</span>'; return; }
-  const STATUS = { SUCCESS: "#34A853", FAILED: "#EA4335", TIMEOUT: "#EA4335", DRY_RUN: "#9aa0a6" };
-  const cw = 46, H = 70, W = Math.max(JOBSETS.length * cw, 200);
-  const svg = svgEl("svg", {width: W, height: H, viewBox: `0 0 ${W} ${H}`});
-  JOBSETS.forEach((j, i) => { const x = i * cw; const dur = j.duration_seconds ? `${Math.floor(j.duration_seconds / 60)}m ${Math.round(j.duration_seconds % 60)}s` : "";
-    svg.appendChild(hover(svgEl("rect", {x: x + 2, y: 4, width: cw - 6, height: 26, rx: 5, fill: STATUS[j.status] || "#999"}), `<b>${j.runtime}/${j.config}</b> — ${j.status}${dur ? " in " + dur : ""}\n${j.workload}${j.slice ? "\nslice: " + j.slice : ""}${j.error ? "\n" + j.error : ""}`));
-    svg.appendChild(svgEl("text", {x: x + cw / 2 - 1, y: 44, class: "lbl", "text-anchor": "middle"}, j.config.length > 7 ? j.config.slice(0, 6) + "…" : j.config));
-    svg.appendChild(svgEl("text", {x: x + cw / 2 - 1, y: 58, class: "lbl", "text-anchor": "middle"}, j.runtime)); });
-  el.appendChild(svg);
+  const el = document.getElementById("runs");
   const ok = JOBSETS.filter(j => j.status === "SUCCESS").length;
-  const lg = document.createElement("div"); lg.className = "muted legend"; lg.style.marginTop = "6px";
-  lg.innerHTML = `<span><span class="sw" style="background:#34A853"></span>succeeded</span><span><span class="sw" style="background:#EA4335"></span>failed / timed out</span><span>${ok}/${JOBSETS.length} succeeded</span>`; el.appendChild(lg); })();
+  const sumEl = document.getElementById("health-summary");
+  if (JOBSETS.length) {
+    sumEl.textContent = `Run health & build provenance (${ok}/${JOBSETS.length} JobSets succeeded)`;
+    if (ok < JOBSETS.length) document.getElementById("health-details").open = true;
+  }
+  if (!JOBSETS.length) { el.innerHTML = '<span class="muted">(no JobSets in this run)</span>'; return; }
+  const STATUS = { SUCCESS: "#16a34a", FAILED: "#dc2626", TIMEOUT: "#dc2626", DRY_RUN: "#94a3b8" };
+  const cw = 52, H = 68, W = Math.max(JOBSETS.length * cw, 200);
+  const svg = svgEl("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}` });
+  JOBSETS.forEach((j, i) => {
+    const x = i * cw;
+    const dur = j.duration_seconds ? `${Math.floor(j.duration_seconds / 60)}m ${Math.round(j.duration_seconds % 60)}s` : "";
+    svg.appendChild(hover(svgEl("rect", { x: x + 2, y: 4, width: cw - 6, height: 24, rx: 5, fill: STATUS[j.status] || "#999" }), `<b>${j.runtime}/${j.config}</b> — ${j.status}${dur ? " in " + dur : ""}\n${j.workload}${j.slice ? "\nslice: " + j.slice : ""}${j.error ? "\n" + j.error : ""}`));
+    svg.appendChild(svgEl("text", { x: x + cw / 2 - 1, y: 42, class: "lbl", "text-anchor": "middle" }, j.config.length > 8 ? j.config.slice(0, 7) + "…" : j.config));
+    svg.appendChild(svgEl("text", { x: x + cw / 2 - 1, y: 56, class: "lbl", "text-anchor": "middle" }, j.runtime));
+  });
+  el.appendChild(svg);
+})();
 
-function panel(bench, short, mode) {
+let currentMode = "thr";
+const MODE_HINTS = {
+  thr: "Showing on-chip hardware speed from XProf traces. Higher bars = faster hardware execution.",
+  dev: "Showing pure TPU chip execution time (XProf p50). Lower bars = faster.",
+  wall: "Showing total Python client wait time: solid = TPU chip time, striped top = Pathways proxy network hop.",
+};
+
+function renderPanel(bench, mode) {
   const rows = ROWS.filter(r => r.benchmark === bench);
+  const meta = BENCH_META[bench] || {
+    title: bench.replace(/Benchmark$/, ""),
+    what: "",
+    unit: (rows.map(thr).find(Boolean) || { u: "Speed" }).u,
+    axisTitle: "Workload size",
+  };
   const keys = [...new Set(rows.map(caseKey))];
-  const label = {}; rows.forEach(r => label[caseKey(r)] = caseLabel(r));
-  keys.sort((a, b) => { const na = Number((label[a].match(/[\d.]+/) || [0])[0]), nb = Number((label[b].match(/[\d.]+/) || [0])[0]); return na - nb || label[a].localeCompare(label[b]); });
-  const W = 560, H = 250, left = 54, right = 10, top = 28, bottom = 36;
-  const svg = svgEl("svg", {width: "100%", viewBox: `0 0 ${W} ${H}`, style: "max-width:600px"});
-  const val = (r, kind) => mode === "time" ? num(kind === "dev" ? r.xprof_p50_ms : r.wall_clock_p50_ms) : (thr(r) ? thr(r).v : null);
-  let max = 0; rows.forEach(r => { for (const k of ["dev", "wall"]) { const v = val(r, k); if (v != null && v > max) max = v; } }); if (!max) max = 1;
-  const yv = v => top + (H - top - bottom) * (1 - v / (max * 1.08));
-  const gw = (W - left - right) / Math.max(keys.length, 1);
-  for (let t = 0; t <= 4; t++) { const v = max * 1.08 * t / 4; svg.appendChild(svgEl("line", {x1: left, x2: W - right, y1: yv(v), y2: yv(v), class: "grid"})); svg.appendChild(svgEl("text", {x: left - 6, y: yv(v) + 4, class: "lbl", "text-anchor": "end"}, v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2))); }
-  svg.appendChild(svgEl("line", {x1: left, x2: W - right, y1: yv(0), y2: yv(0), class: "axis"}));
-  const unit = mode === "time" ? "p50 step time (ms)" : ((rows.map(thr).find(Boolean) || {u: ""}).u.replace(" (wall)", ""));
-  svg.appendChild(svgEl("text", {x: left, y: 14, class: "lbl2"}, `${short} — ${unit}`));
-  if (mode !== "time") { const defs = svgEl("defs"); RT.forEach(rt => { const p = svgEl("pattern", {id: `hatch-${rt}`, width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)"}); p.appendChild(svgEl("rect", {width: 6, height: 6, fill: COLOR[rt], opacity: .25})); p.appendChild(svgEl("line", {x1: 0, y1: 0, x2: 0, y2: 6, stroke: COLOR[rt], "stroke-width": 2})); defs.appendChild(p); }); svg.appendChild(defs); }
-  keys.forEach((key, i) => { const gx = left + i * gw; svg.appendChild(svgEl("text", {x: gx + gw / 2, y: H - 14, class: "lbl", "text-anchor": "middle"}, label[key]));
-    const bw = (gw - 16) / Math.max(RT.length, 1);
-    RT.forEach((rt, j) => { const r = rows.find(q => (q.runtime || "mcjax") === rt && caseKey(q) === key); if (!r) return; const bx = gx + 8 + j * bw; const dev = val(r, "dev"), wall = val(r, "wall"); const t = thr(r);
-      const tt = `<b>${short} · ${rt}</b>\n${label[key]}\nxprof p50/p90: ${f(r.xprof_p50_ms,3)} / ${f(r.xprof_p90_ms,3)} ms\nwall p50/p90/avg±std: ${f(r.wall_clock_p50_ms,3)} / ${f(r.wall_clock_p90_ms,3)} / ${f(r.wall_clock_avg_ms,3)} ± ${f(r.wall_clock_std_ms,3)} ms` + (t ? `\nthroughput: ${f(t.v)} ${t.u}` : "") + (slice(r) ? `\nslice: ${slice(r)}` : "");
-      if (mode === "time") { if (wall != null) svg.appendChild(hover(svgEl("rect", {x: bx + 1, y: yv(wall), width: Math.max(bw - 3, 1), height: yv(0) - yv(wall), fill: "none", stroke: COLOR[rt], "stroke-width": 1.5, rx: 2}), tt)); if (dev != null) svg.appendChild(hover(svgEl("rect", {x: bx + 1, y: yv(dev), width: Math.max(bw - 3, 1), height: yv(0) - yv(dev), fill: COLOR[rt], opacity: .9, rx: 2}), tt)); }
-      else if (t) svg.appendChild(hover(svgEl("rect", {x: bx + 1, y: yv(t.v), width: Math.max(bw - 3, 1), height: yv(0) - yv(t.v), fill: t.wall ? `url(#hatch-${rt})` : COLOR[rt], stroke: COLOR[rt], "stroke-width": t.wall ? 1 : 0, rx: 2}), tt)); }); });
-  const wrap = document.createElement("div"); wrap.className = "panel"; wrap.appendChild(svg); return wrap;
-}
-for (const [b, s] of BENCH) document.getElementById("bars").appendChild(panel(b, s, "time"));
-for (const [b, s] of BENCH) document.getElementById("thr").appendChild(panel(b, s, "thr"));
+  const labels = {};
+  const sortNum = {};
+  rows.forEach(r => {
+    const k = caseKey(r);
+    labels[k] = caseLabels(r);
+    sortNum[k] = Number(r.shard_size_mib || r.data_size_mib || r.m || r.matrix_dim || r.num_elements || 0);
+  });
+  keys.sort((a, b) => sortNum[a] - sortNum[b]);
 
-// Ratio heat map
-(function(){ const others = RT.filter(rt => rt !== "mcjax"); const el = document.getElementById("heat");
-  if (!others.length || !RT.includes("mcjax")) { el.innerHTML = '<span class="muted">(needs McJAX and at least one other runtime)</span>'; return; }
-  const cols = []; for (const rt of others) { cols.push([rt, "xprof_p50_ms", `${rt} / mcjax (device)`]); cols.push([rt, "wall_clock_p50_ms", `${rt} / mcjax (wall)`]); }
-  const allCases = []; for (const [b, s] of BENCH) { const rows = ROWS.filter(r => r.benchmark === b); const keys = [...new Set(rows.map(caseKey))];
-    for (const key of keys) { const per = {}; rows.filter(r => caseKey(r) === key).forEach(r => per[r.runtime || "mcjax"] = r); const any = rows.find(r => caseKey(r) === key); allCases.push({label: `${s} ${caseLabel(any)}`, per}); } }
-  const cases = allCases;
-  // Drop columns without a single ratio (e.g. device time of a runtime that has no traces).
-  const hasData = ([rt, key]) => cases.some(cs => cs.per[rt] && num(cs.per[rt][key]) != null && cs.per["mcjax"] && num(cs.per["mcjax"][key]));
-  const liveCols = cols.filter(hasData); if (!liveCols.length) { el.innerHTML = '<span class="muted">(no comparable cases)</span>'; return; }
-  cols.length = 0; cols.push(...liveCols);
-  const color = v => { if (v == null) return "var(--mutedbg)"; if (v < 0.97) return "#1e8e3e"; const t = Math.max(0, Math.min(1, Math.log2(v) / 2)); return `rgb(${Math.round(52 + t * 182)},${Math.round(168 - t * 101)},${Math.round(83 - t * 30)})`; };
-  const rowH = 24, left = 280, cw = 150, top = 34, W = left + cols.length * cw + 10, H = top + cases.length * rowH + 8;
-  const svg = svgEl("svg", {width: W, height: H, viewBox: `0 0 ${W} ${H}`});
-  cols.forEach((c, j) => svg.appendChild(svgEl("text", {x: left + j * cw + cw / 2, y: 20, class: "lbl2", "text-anchor": "middle"}, c[2])));
-  cases.forEach((cs, i) => { const y = top + i * rowH; svg.appendChild(svgEl("text", {x: left - 8, y: y + 16, class: "lbl", "text-anchor": "end"}, cs.label));
-    cols.forEach(([rt, key], j) => { const r = cs.per[rt], base = cs.per["mcjax"]; const a = r ? num(r[key]) : null, b = base ? num(base[key]) : null; const v = (a != null && b) ? a / b : null;
-      svg.appendChild(hover(svgEl("rect", {x: left + j * cw + 2, y: y + 2, width: cw - 4, height: rowH - 4, rx: 4, fill: color(v), opacity: v == null ? .5 : .92}), `<b>${cs.label}</b>\n${rt}: ${f(a,3)} ms vs mcjax ${f(b,3)} ms (${key.includes("xprof") ? "device" : "wall clock"})` + (r && slice(r) ? `\n${rt} slice: ${slice(r)}` : "") + (base && slice(base) ? `\nmcjax slice: ${slice(base)}` : "")));
-      svg.appendChild(svgEl("text", {x: left + j * cw + cw / 2, y: y + 16, "text-anchor": "middle", style: "fill:#fff;font-size:12px;font-weight:600;pointer-events:none"}, v == null ? "n/a" : v.toFixed(2) + "x")); }); });
-  el.appendChild(svg); })();
+  const W = 520, H = 240, left = 48, right = 12, top = 22, bottom = 52;
+  const svg = svgEl("svg", { width: "100%", viewBox: `0 0 ${W} ${H}` });
+  const defs = svgEl("defs");
+  RT.forEach(rt => {
+    const p = svgEl("pattern", { id: `stripe-${bench}-${rt}`, width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+    p.appendChild(svgEl("rect", { width: 6, height: 6, fill: COLOR[rt], opacity: 0.22 }));
+    p.appendChild(svgEl("line", { x1: 0, y1: 0, x2: 0, y2: 6, stroke: COLOR[rt], "stroke-width": 2 }));
+    defs.appendChild(p);
+  });
+  svg.appendChild(defs);
+
+  const valOf = r => {
+    if (mode === "thr") { const t = thr(r); return t ? t.v : null; }
+    if (mode === "dev") return num(r.xprof_p50_ms) ?? num(r.wall_clock_p50_ms);
+    return num(r.wall_clock_p50_ms);
+  };
+  let max = 0;
+  rows.forEach(r => { const v = valOf(r); if (v != null && v > max) max = v; });
+  if (!max) max = 1;
+  const yMax = max * 1.18;
+  const yv = v => top + (H - top - bottom) * (1 - v / yMax);
+  const gw = (W - left - right) / Math.max(keys.length, 1);
+
+  for (let t = 0; t <= 4; t++) {
+    const v = (max * t) / 4;
+    svg.appendChild(svgEl("line", { x1: left, x2: W - right, y1: yv(v), y2: yv(v), class: "grid" }));
+    svg.appendChild(svgEl("text", { x: left - 6, y: yv(v) + 4, class: "lbl", "text-anchor": "end" }, fmtVal(v)));
+  }
+  svg.appendChild(svgEl("line", { x1: left, x2: W - right, y1: yv(0), y2: yv(0), class: "axis" }));
+
+  keys.forEach((key, i) => {
+    const gx = left + i * gw;
+    const cx = gx + gw / 2;
+    svg.appendChild(svgEl("text", { x: cx, y: H - 30, class: "lbl-x", "text-anchor": "middle" }, labels[key].main));
+    if (labels[key].sub) {
+      svg.appendChild(svgEl("text", { x: cx, y: H - 17, class: "lbl-xsub", "text-anchor": "middle" }, labels[key].sub));
+    }
+    const pad = Math.min(22, gw * 0.16);
+    const bw = (gw - pad * 2) / Math.max(RT.length, 1);
+    RT.forEach((rt, j) => {
+      const r = rows.find(q => (q.runtime || "mcjax") === rt && caseKey(q) === key);
+      if (!r) return;
+      const bx = gx + pad + j * bw;
+      const barW = Math.max(bw - 4, 4);
+      const v = valOf(r);
+      if (v == null) return;
+      const dev = num(r.xprof_p50_ms), wall = num(r.wall_clock_p50_ms), t = thr(r);
+      const overhead = (dev != null && wall != null && wall > dev) ? (wall - dev) : null;
+      const tt = `<b>${meta.title.split(" · ")[0]} · ${rtName(rt)}</b>\nSize: ${labels[key].main} ${labels[key].sub ? "(" + labels[key].sub + ")" : ""}` +
+        (t ? `\nHardware speed: <b>${f(t.v, 1)} ${t.u}</b>` : "") +
+        (dev != null ? `\nTPU chip time (XProf p50): <b>${f(dev, 2)} ms</b>` : "\nTPU chip time: not captured") +
+        (wall != null ? `\nTotal client wait (wall p50): <b>${f(wall, 2)} ms</b>` : "") +
+        (overhead != null ? `\nProxy / host overhead: <b>+${f(overhead, 2)} ms</b>` : "") +
+        (slice(r) ? `\nTPU slice: ${slice(r)}` : "");
+
+      if (mode === "wall" && dev != null && wall != null && wall > dev) {
+        svg.appendChild(hover(svgEl("rect", { x: bx + 2, y: yv(wall), width: barW, height: yv(dev) - yv(wall), fill: `url(#stripe-${bench}-${rt})`, stroke: COLOR[rt], "stroke-width": 1, rx: 3 }), tt));
+        svg.appendChild(hover(svgEl("rect", { x: bx + 2, y: yv(dev), width: barW, height: yv(0) - yv(dev), fill: COLOR[rt], rx: 2 }), tt));
+      } else {
+        const isWallFallback = (mode === "thr" && t && t.wall) || (mode === "dev" && dev == null);
+        svg.appendChild(hover(svgEl("rect", { x: bx + 2, y: yv(v), width: barW, height: Math.max(yv(0) - yv(v), 2), fill: isWallFallback ? `url(#stripe-${bench}-${rt})` : COLOR[rt], stroke: COLOR[rt], "stroke-width": isWallFallback ? 1 : 0, rx: 3 }), tt));
+      }
+      svg.appendChild(svgEl("text", { x: bx + 2 + barW / 2, y: Math.max(yv(v) - 5, 11), class: "val-lbl", "text-anchor": "middle" }, fmtVal(v)));
+    });
+  });
+  svg.appendChild(svgEl("text", { x: left + (W - left - right) / 2, y: H - 3, class: "lbl", "text-anchor": "middle" }, meta.axisTitle));
+
+  const unitLabel = mode === "thr" ? meta.unit : mode === "dev" ? "TPU chip time (ms, p50)" : "Client wait = solid chip + striped proxy (ms)";
+  const dirLabel = mode === "thr" ? "↑ Higher is better" : "↓ Lower is better";
+  const wrap = document.createElement("div");
+  wrap.className = "panel";
+  wrap.innerHTML = `<div class="panel-head"><span class="panel-title">${meta.title}</span><span class="dir">${dirLabel}</span></div><div class="panel-sub">${meta.what ? meta.what + " · " : ""}<b>${unitLabel}</b></div>`;
+  wrap.appendChild(svg);
+  return wrap;
+}
+
+function setMode(m) {
+  currentMode = m;
+  for (const id of ["thr", "dev", "wall"]) {
+    document.getElementById("btn-" + id).classList.toggle("active", id === m);
+  }
+  document.getElementById("mode-hint").textContent = MODE_HINTS[m];
+  const container = document.getElementById("charts");
+  container.innerHTML = "";
+  for (const b of BENCH) container.appendChild(renderPanel(b, m));
+}
+setMode("thr");
 </script>
 </body>
 </html>

@@ -628,6 +628,38 @@ function refreshAll() {
 function setMode(m) { currentMode = m; refreshAll(); }
 function setStat(s) { currentStat = s; refreshAll(); }
 refreshAll();
+
+// When opened via https://storage.cloud.google.com/..., GCS 302-redirects the
+// browser tab to a temporary signed URL on *-apidata.googleusercontent.com/...?jk=...
+// Rewrite relative links to canonical storage.cloud.google.com URLs and redirect
+// refreshes/stale tabs back through storage.cloud.google.com so the ?jk= token
+// never expires in place.
+(function() {
+  if (!location.hostname.endsWith("googleusercontent.com")) return;
+  const m = location.pathname.match(/\/b\/([^/]+)\/o\/(.+)$/);
+  if (!m) return;
+  const objPath = decodeURIComponent(m[2]);
+  const canonicalUrl = "https://storage.cloud.google.com/" + m[1] + "/" + objPath;
+  const baseDir = canonicalUrl.replace(/\/[^/]+$/, "/");
+  document.querySelectorAll("a[href]").forEach(a => {
+    const h = a.getAttribute("href");
+    if (h && !h.startsWith("http") && !h.startsWith("#")) {
+      a.setAttribute("href", baseDir + h);
+    }
+  });
+  const loadedAt = Date.now();
+  window.addEventListener("keydown", e => {
+    if (e.key === "F5" || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r")) {
+      e.preventDefault();
+      location.replace(canonicalUrl);
+    }
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && Date.now() - loadedAt > 12 * 60 * 1000) {
+      location.replace(canonicalUrl);
+    }
+  });
+})();
 </script>
 </body>
 </html>

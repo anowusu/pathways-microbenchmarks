@@ -4,16 +4,17 @@
 #   kubectl apply -f automation/k8s/nightly_cronjob.yaml
 #   kubectl create job --from=cronjob/tpums-nightly tpums-nightly-manual   # run now
 #
-# The KSA is bound to the GSA tpums-nightly@cloud-tpu-multipod-dev through
-# Workload Identity (GCS bucket + BigQuery dataset writes); the Role lets the
-# driver create and watch JobSets in this namespace.
+# The KSA is bound to the project compute GSA (735972712744-compute@developer)
+# through Workload Identity (Artifact Registry reader on cloud-tpu-v2-images +
+# writer on pathways-dev, GCS bucket + BigQuery dataset writes); the Role lets
+# the driver create and watch JobSets in this namespace.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: tpums-nightly
   namespace: default
   annotations:
-    iam.gke.io/gcp-service-account: tpums-nightly@cloud-tpu-multipod-dev.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: 735972712744-compute@developer.gserviceaccount.com
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

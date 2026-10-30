@@ -599,15 +599,17 @@ class RuntimeComparisonTest(absltest.TestCase):
     tables = runtime_comparison.build_comparison({"collectives": rows})
     self.assertLen(tables, 1)
     table = tables[0]
+    self.assertNotIn("wall_clock_std_ms", table.headers)
+    self.assertIn("xprof_avg_ms", table.headers)
     self.assertEqual(table.runtimes, ["mcjax", "louhi", "rapid"])
     by_runtime = {r["runtime"]: r for r in table.rows}
     self.assertEqual(by_runtime["mcjax"]["vs_mcjax"], "baseline")
-    self.assertEqual(by_runtime["rapid"]["vs_mcjax"], "1.05x (xprof)")
-    self.assertEqual(by_runtime["louhi"]["vs_mcjax"], "1.05x (wall)")
+    self.assertEqual(by_runtime["rapid"]["vs_mcjax"], "1.0500x (xprof)")
+    self.assertEqual(by_runtime["louhi"]["vs_mcjax"], "1.0474x (wall)")
     self.assertEqual(by_runtime["louhi"]["xprof"], "wall-clock only")
     self.assertEqual(by_runtime["rapid"]["xprof"], "device 5/5")
-    self.assertEqual(by_runtime["rapid"]["throughput"], "51.10 GB/s/chip")
-    self.assertEqual(by_runtime["louhi"]["throughput"], "27.10 GB/s/chip (wall)")
+    self.assertEqual(by_runtime["rapid"]["throughput"], "51.100 GB/s/chip")
+    self.assertEqual(by_runtime["louhi"]["throughput"], "27.100 GB/s/chip (wall)")
     self.assertStartsWith(by_runtime["mcjax"]["case"], "AllGatherBenchmark topology=4x8")
 
   def test_rows_without_runtime_count_as_mcjax(self):

@@ -70,10 +70,10 @@ COMPARISON_HEADERS: tuple[str, ...] = (
     "runtime",
     "xprof_p50_ms",
     "xprof_p90_ms",
+    "xprof_avg_ms",
     "wall_clock_p50_ms",
     "wall_clock_p90_ms",
     "wall_clock_avg_ms",
-    "wall_clock_std_ms",
     "throughput",
     "xprof",
     "vs_mcjax",
@@ -120,8 +120,8 @@ def _to_float(value: Any) -> Optional[float]:
   return number if math.isfinite(number) else None
 
 
-def _fmt(value: Optional[float], digits: int = 3) -> str:
-  return "" if value is None else f"{value:.{digits}f}"
+def _fmt(value: Optional[float], sig_figs: int = 5) -> str:
+  return "" if value is None else f"{value:#.{sig_figs}g}".rstrip(".")
 
 
 def case_key(row: Mapping[str, Any], category: str) -> tuple[str, ...]:
@@ -147,7 +147,7 @@ def _throughput(row: Mapping[str, Any]) -> str:
   for col, unit in _THROUGHPUT_COLUMNS:
     value = _to_float(row.get(col))
     if value is not None:
-      return f"{value:.2f} {unit}"
+      return f"{_fmt(value)} {unit}"
   return ""
 
 
@@ -175,7 +175,7 @@ def _ratio(
     own = _to_float(row.get(col))
     base = _to_float(baseline.get(col))
     if own is not None and base:
-      return f"{own / base:.2f}x ({label})"
+      return f"{_fmt(own / base)}x ({label})"
   return "n/a"
 
 
@@ -217,10 +217,10 @@ def build_comparison(
             "runtime": runtime,
             "xprof_p50_ms": _fmt(_to_float(row.get("xprof_p50_ms"))),
             "xprof_p90_ms": _fmt(_to_float(row.get("xprof_p90_ms"))),
+            "xprof_avg_ms": _fmt(_to_float(row.get("xprof_avg_ms"))),
             "wall_clock_p50_ms": _fmt(_to_float(row.get("wall_clock_p50_ms"))),
             "wall_clock_p90_ms": _fmt(_to_float(row.get("wall_clock_p90_ms"))),
             "wall_clock_avg_ms": _fmt(_to_float(row.get("wall_clock_avg_ms"))),
-            "wall_clock_std_ms": _fmt(_to_float(row.get("wall_clock_std_ms"))),
             "throughput": _throughput(row),
             "xprof": _xprof_status(row),
             "vs_mcjax": _ratio(row, baseline),

@@ -65,7 +65,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .lbl { fill: var(--muted); font-size: 11px; }
   .lbl-x { fill: var(--fg); font-size: 11.5px; font-weight: 600; }
   .lbl-xsub { fill: var(--muted); font-size: 10.5px; }
-  .val-lbl { fill: var(--fg); font-size: 11px; font-weight: 600; }
+  .val-lbl { fill: var(--fg); font-size: 9.5px; font-weight: 600; }
   details summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); user-select: none; }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
@@ -94,7 +94,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="seg" role="tablist" aria-label="Statistic">
           <button id="stat-p50" class="active" onclick="setStat('p50')">p50 (Median)</button>
           <button id="stat-p90" onclick="setStat('p90')">p90 (90th %ile)</button>
-          <button id="stat-avg" onclick="setStat('avg')">Mean ± Std</button>
+          <button id="stat-avg" onclick="setStat('avg')">Mean</button>
         </div>
       </div>
       <div class="muted" id="mode-hint"></div>
@@ -160,8 +160,8 @@ const rtName = rt => (RT_META[rt] && RT_META[rt].name) || rt;
 const BENCH = [...new Set(ROWS.map(r => r.benchmark))];
 const CASE_KEYS = ["matrix_dim", "num_elements", "data_size_mib", "m", "k", "n", "shard_size_mib", "dtype", "in_dtype", "out_dtype", "src_device_index", "dst_device_index", "mesh_shape", "sharding_strategy"];
 const num = v => (v === "" || v == null) ? null : Number(v);
-const f = (v, d = 1) => (v == null || Number.isNaN(Number(v))) ? "–" : Number(v).toFixed(d);
-const fmtVal = v => v == null ? "" : (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+const sig5 = v => (v == null || v === "" || Number.isNaN(Number(v))) ? "–" : Number(v).toPrecision(5);
+const fmtVal = v => (v == null || Number.isNaN(Number(v))) ? "" : (Number(v) === 0 ? "0" : Number(v).toPrecision(5));
 const fmtMib = mib => { const n = Number(mib); if (!n) return ""; return n >= 1024 ? `${(n / 1024).toFixed(n % 1024 ? 1 : 0)} GB` : `${n.toFixed(0)} MB`; };
 const fmtK = n => { const v = Number(n); return v >= 1024 && v % 1024 === 0 ? `${v / 1024}K` : String(n); };
 const slice = r => (r.node_pools || "").split(",").filter(p => p.startsWith("gke-tpu-")).map(p => p.replace("gke-", "")).join(", ");
@@ -252,22 +252,22 @@ function renderKpis() {
     });
     if (rt !== "mcjax" && ratios.length) {
       const geo = Math.exp(ratios.reduce((s, x) => s + Math.log(x), 0) / ratios.length);
-      const pct = Math.round(geo * 100);
+      const pct = (geo * 100).toPrecision(5);
       headline = `${pct}% of McJAX chip speed (${st})`;
-      badgeText = pct >= 97 ? "Matches McJAX" : `${pct}% vs McJAX`;
+      badgeText = geo >= 0.97 ? "Matches McJAX" : `${pct}% vs McJAX`;
     }
     let sub = meta.desc;
     let tipText = `<b>${meta.name}</b>\n${meta.desc}`;
     const medOf = arr => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
     if (rt === "mcjax" && hostGaps.length) {
       const medGap = medOf(hostGaps);
-      sub = `${meta.desc} (no proxy) · +${medGap.toFixed(1)} ms local host sync (${st})`;
-      tipText += `\n\n<b>Local host sync (no proxy in McJAX):</b>\nhost_sync = McJAX Wall-Clock (${st}) − McJAX Chip XProf (${st})\nMedian across ${hostGaps.length} cases: +${medGap.toFixed(2)} ms (Python block_until_ready + PJRT host callback)`;
+      sub = `${meta.desc} (no proxy) · +${sig5(medGap)} ms local host sync (${st})`;
+      tipText += `\n\n<b>Local host sync (no proxy in McJAX):</b>\nhost_sync = McJAX Wall-Clock (${st}) − McJAX Chip XProf (${st})\nMedian across ${hostGaps.length} cases: +${sig5(medGap)} ms (Python block_until_ready + PJRT host callback)`;
     } else if (rt !== "mcjax" && hostGaps.length) {
       const medGap = medOf(hostGaps);
       const medProxy = proxyDeltas.length ? medOf(proxyDeltas) : medGap;
-      sub = `${meta.desc} · +${medProxy.toFixed(1)} ms proxy hop over McJAX (+${medGap.toFixed(1)} ms total wall−chip, ${st})`;
-      tipText += `\n\n<b>How the Pathways proxy hop is calculated (${st}):</b>\n1. Total host+proxy gap = Wall-Clock (${st}) − Chip XProf (${st}) (median +${medGap.toFixed(2)} ms)\n2. Subtract McJAX's local host sync on the same case:\n   proxy_hop = (Pathways Wall − Chip) − (McJAX Wall − Chip)\n   Median added proxy hop across ${proxyDeltas.length} cases: <b>+${medProxy.toFixed(2)} ms</b>`;
+      sub = `${meta.desc} · +${sig5(medProxy)} ms proxy hop over McJAX (+${sig5(medGap)} ms total wall−chip, ${st})`;
+      tipText += `\n\n<b>How the Pathways proxy hop is calculated (${st}):</b>\n1. Total host+proxy gap = Wall-Clock (${st}) − Chip XProf (${st}) (median +${sig5(medGap)} ms)\n2. Subtract McJAX's local host sync on the same case:\n   proxy_hop = (Pathways Wall − Chip) − (McJAX Wall − Chip)\n   Median added proxy hop across ${proxyDeltas.length} cases: <b>+${sig5(medProxy)} ms</b>`;
     }
     const div = document.createElement("div");
     div.className = "kpi";
@@ -336,7 +336,7 @@ function renderPanel(bench, mode) {
   });
   keys.sort((a, b) => sortNum[a] - sortNum[b]);
 
-  const W = 520, H = 240, left = 48, right = 12, top = 22, bottom = 52;
+  const W = 540, H = 240, left = 54, right = 12, top = 22, bottom = 52;
   const svg = svgEl("svg", { width: "100%", viewBox: `0 0 ${W} ${H}` });
   const defs = svgEl("defs");
   RT.forEach(rt => {
@@ -352,14 +352,10 @@ function renderPanel(bench, mode) {
     if (mode === "dev") return devTime(r) ?? wallTime(r);
     return wallTime(r);
   };
-  const stdOf = r => {
-    if (currentStat !== "avg" || mode === "thr") return null;
-    return mode === "dev" ? num(r.xprof_std_ms) : num(r.wall_clock_std_ms);
-  };
   let max = 0;
   rows.forEach(r => {
-    const v = valOf(r), sd = stdOf(r) || 0;
-    if (v != null && v + sd > max) max = v + sd;
+    const v = valOf(r);
+    if (v != null && v > max) max = v;
   });
   if (!max) max = 1;
   const yMax = max * 1.18;
@@ -380,7 +376,7 @@ function renderPanel(bench, mode) {
     if (labels[key].sub) {
       svg.appendChild(svgEl("text", { x: cx, y: H - 17, class: "lbl-xsub", "text-anchor": "middle" }, labels[key].sub));
     }
-    const pad = Math.min(22, gw * 0.16);
+    const pad = Math.min(12, gw * 0.10);
     const bw = (gw - pad * 2) / Math.max(RT.length, 1);
     RT.forEach((rt, j) => {
       const r = rows.find(q => (q.runtime || "mcjax") === rt && caseKey(q) === key);
@@ -389,7 +385,7 @@ function renderPanel(bench, mode) {
       const barW = Math.max(bw - 4, 4);
       const v = valOf(r);
       if (v == null) return;
-      const dev = devTime(r), wall = wallTime(r), t = thrAt(r), sd = stdOf(r);
+      const dev = devTime(r), wall = wallTime(r), t = thrAt(r);
       const overhead = (dev != null && wall != null && wall > dev) ? (wall - dev) : null;
       const baseRow = rows.find(q => (q.runtime || "mcjax") === "mcjax" && caseKey(q) === key);
       const baseGap = (baseRow && devTime(baseRow) != null && wallTime(baseRow) != null)
@@ -397,18 +393,18 @@ function renderPanel(bench, mode) {
       const proxyHop = (rt !== "mcjax" && overhead != null && baseGap != null) ? (overhead - baseGap) : null;
       const overheadLine = overhead == null ? "" : (
         rt === "mcjax"
-          ? `\nLocal host sync (${st} wall − chip, no proxy): <b>+${f(overhead, 2)} ms</b> (${f(wall, 2)} − ${f(dev, 2)} ms)`
-          : `\nTotal host + proxy gap (${st} wall − chip): <b>+${f(overhead, 2)} ms</b> (${f(wall, 2)} − ${f(dev, 2)} ms)` +
-            (proxyHop != null ? `\nAdded Pathways proxy hop vs McJAX (${st}): <b>+${f(proxyHop, 2)} ms</b> (${f(overhead, 2)} − ${f(baseGap, 2)} ms)` : "")
+          ? `\nLocal host sync (${st} wall − chip, no proxy): <b>+${sig5(overhead)} ms</b> (${sig5(wall)} − ${sig5(dev)} ms)`
+          : `\nTotal host + proxy gap (${st} wall − chip): <b>+${sig5(overhead)} ms</b> (${sig5(wall)} − ${sig5(dev)} ms)` +
+            (proxyHop != null ? `\nAdded Pathways proxy hop vs McJAX (${st}): <b>+${sig5(proxyHop)} ms</b> (${sig5(overhead)} − ${sig5(baseGap)} ms)` : "")
       );
       const devStats = num(r.xprof_p50_ms) != null
-        ? `\nTPU chip (p50 / p90 / mean±std): <b>${f(r.xprof_p50_ms, 2)}</b> / <b>${f(r.xprof_p90_ms, 2)}</b> / <b>${f(r.xprof_avg_ms ?? r.xprof_p50_ms, 2)}±${f(r.xprof_std_ms ?? 0, 2)} ms</b>`
+        ? `\nTPU chip (p50 / p90 / mean): <b>${sig5(r.xprof_p50_ms)}</b> / <b>${sig5(r.xprof_p90_ms)}</b> / <b>${sig5(r.xprof_avg_ms ?? r.xprof_p50_ms)} ms</b>`
         : "\nTPU chip time: not captured";
       const wallStats = num(r.wall_clock_p50_ms) != null
-        ? `\nClient wall (p50 / p90 / mean±std): <b>${f(r.wall_clock_p50_ms, 2)}</b> / <b>${f(r.wall_clock_p90_ms, 2)}</b> / <b>${f(r.wall_clock_avg_ms, 2)}±${f(r.wall_clock_std_ms, 2)} ms</b>`
+        ? `\nClient wall (p50 / p90 / mean): <b>${sig5(r.wall_clock_p50_ms)}</b> / <b>${sig5(r.wall_clock_p90_ms)}</b> / <b>${sig5(r.wall_clock_avg_ms)} ms</b>`
         : "";
       const tt = `<b>${meta.title.split(" · ")[0]} · ${rtName(rt)}</b>\nSize: ${labels[key].main} ${labels[key].sub ? "(" + labels[key].sub + ")" : ""}` +
-        (t ? `\nHardware speed (${st}): <b>${f(t.v, 1)} ${t.u}</b>` : "") +
+        (t ? `\nHardware speed (${st}): <b>${sig5(t.v)} ${t.u}</b>` : "") +
         devStats + wallStats + overheadLine +
         (slice(r) ? `\nTPU slice: ${slice(r)}` : "");
 
@@ -419,15 +415,7 @@ function renderPanel(bench, mode) {
         const isWallFallback = (mode === "thr" && t && t.wall) || (mode === "dev" && dev == null);
         svg.appendChild(hover(svgEl("rect", { x: bx + 2, y: yv(v), width: barW, height: Math.max(yv(0) - yv(v), 2), fill: isWallFallback ? `url(#stripe-${bench}-${rt})` : COLOR[rt], stroke: COLOR[rt], "stroke-width": isWallFallback ? 1 : 0, rx: 3 }), tt));
       }
-      if (sd != null && sd > 0) {
-        const cxBar = bx + 2 + barW / 2;
-        const yHi = yv(v + sd), yLo = yv(Math.max(0, v - sd));
-        svg.appendChild(svgEl("line", { x1: cxBar, x2: cxBar, y1: yHi, y2: yLo, stroke: "var(--fg)", "stroke-width": 1.3 }));
-        svg.appendChild(svgEl("line", { x1: cxBar - 3, x2: cxBar + 3, y1: yHi, y2: yHi, stroke: "var(--fg)", "stroke-width": 1.3 }));
-        svg.appendChild(svgEl("line", { x1: cxBar - 3, x2: cxBar + 3, y1: yLo, y2: yLo, stroke: "var(--fg)", "stroke-width": 1.3 }));
-      }
-      const lblY = sd != null && sd > 0 ? Math.max(yv(v + sd) - 4, 11) : Math.max(yv(v) - 5, 11);
-      svg.appendChild(svgEl("text", { x: bx + 2 + barW / 2, y: lblY, class: "val-lbl", "text-anchor": "middle" }, fmtVal(v)));
+      svg.appendChild(svgEl("text", { x: bx + 2 + barW / 2, y: Math.max(yv(v) - 5, 11), class: "val-lbl", "text-anchor": "middle" }, fmtVal(v)));
     });
   });
   svg.appendChild(svgEl("text", { x: left + (W - left - right) / 2, y: H - 3, class: "lbl", "text-anchor": "middle" }, meta.axisTitle));
@@ -466,9 +454,8 @@ _ROW_KEYS = (
     "runtime", "benchmark", "matrix_dim", "num_elements", "data_size_mib",
     "m", "k", "n", "in_dtype", "out_dtype", "dtype", "shard_size_mib",
     "mesh_shape", "sharding_strategy", "src_device_index", "dst_device_index",
-    "xprof_p50_ms", "xprof_p90_ms", "xprof_avg_ms", "xprof_std_ms",
-    "wall_clock_p50_ms", "wall_clock_p90_ms",
-    "wall_clock_avg_ms", "wall_clock_std_ms",
+    "xprof_p50_ms", "xprof_p90_ms", "xprof_avg_ms",
+    "wall_clock_p50_ms", "wall_clock_p90_ms", "wall_clock_avg_ms",
     "xprof_bandwidth_per_chip_gb_s", "wall_clock_bandwidth_per_chip_gb_s",
     "xprof_bandwidth_per_device_gb_s", "wall_clock_bandwidth_per_device_gb_s",
     "xprof_tflops_per_device", "wall_clock_tflops_per_device",

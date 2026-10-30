@@ -90,7 +90,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <div class="seg" role="tablist" aria-label="Metric">
           <button id="btn-thr" class="active" onclick="setMode('thr')">Hardware Speed (GB/s · TFLOP/s)</button>
           <button id="btn-dev" onclick="setMode('dev')">TPU Chip Time (ms)</button>
-          <button id="btn-wall" onclick="setMode('wall')">Client Wall Clock = Chip + Host/Proxy (ms)</button>
+          <button id="btn-wall" onclick="setMode('wall')">End-to-End Wall Clock (ms)</button>
         </div>
         <div class="seg" role="tablist" aria-label="Statistic">
           <button id="stat-p50" class="active" onclick="setStat('p50')">p50 (Median)</button>
@@ -322,7 +322,7 @@ function renderKpis() {
 const MODE_HINTS = {
   thr: "Showing on-chip hardware speed from XProf traces. Higher bars = faster hardware execution.",
   dev: "Showing pure TPU chip execution time (XProf). Lower bars = faster.",
-  wall: "Solid bottom = TPU chip time (XProf); striped top = Wall − Chip (local host sync in McJAX; host sync + gRPC proxy hop in Louhi/Rapid).",
+  wall: "Total bar = Python end-to-end wait time. Solid bottom = TPU chip time; striped top = overhead outside the TPU (McJAX: local CPU-TPU sync; Louhi/Rapid: CPU sync + Pathways proxy hop).",
 };
 
 function renderPanel(bench, mode) {
@@ -434,7 +434,7 @@ function renderPanel(bench, mode) {
   });
   svg.appendChild(svgEl("text", { x: left + (W - left - right) / 2, y: H - 4, class: "lbl", "text-anchor": "middle" }, meta.axisTitle));
 
-  const unitLabel = mode === "thr" ? `${meta.unit} (${st})` : mode === "dev" ? `TPU chip time (ms, ${st})` : `Client wall-clock (${st}) = solid chip + striped host/proxy gap (ms)`;
+  const unitLabel = mode === "thr" ? `${meta.unit} (${st})` : mode === "dev" ? `TPU chip time (ms, ${st})` : `End-to-end wall clock (ms, ${st}) — solid bottom: TPU chip · striped top: CPU/proxy overhead`;
   const dirLabel = mode === "thr" ? "↑ Higher is better" : "↓ Lower is better";
   const wrap = document.createElement("div");
   wrap.className = isWide ? "panel panel-wide" : "panel";

@@ -207,32 +207,35 @@ document.getElementById("legend").innerHTML = RT.map(rt => `<span><span class="s
     const meta = RT_META[rt] || { name: rt, desc: "" };
     let headline = `${rtRows.length} cases measured`;
     let badgeText = "Baseline";
+    const ratios = [];
+    const overheads = [];
+    rtRows.forEach(r => {
+      const b = baseByKey[r.benchmark + "|" + caseKey(r)];
+      const tRt = thr(r), tBase = b ? thr(b) : null;
+      if (tRt && tBase && tBase.v > 0 && !tRt.wall && !tBase.wall) ratios.push(tRt.v / tBase.v);
+      const dev = num(r.xprof_p50_ms), wall = num(r.wall_clock_p50_ms);
+      if (dev != null && wall != null && wall >= dev) overheads.push(wall - dev);
+    });
+    if (rt !== "mcjax" && ratios.length) {
+      const geo = Math.exp(ratios.reduce((s, x) => s + Math.log(x), 0) / ratios.length);
+      const pct = Math.round(geo * 100);
+      headline = `${pct}% of McJAX chip speed`;
+      badgeText = pct >= 97 ? "Matches McJAX" : `${pct}% vs McJAX`;
+    }
     let sub = meta.desc;
-    if (rt !== "mcjax") {
-      const ratios = [];
-      const overheads = [];
-      rtRows.forEach(r => {
-        const b = baseByKey[r.benchmark + "|" + caseKey(r)];
-        const tRt = thr(r), tBase = b ? thr(b) : null;
-        if (tRt && tBase && tBase.v > 0 && !tRt.wall && !tBase.wall) ratios.push(tRt.v / tBase.v);
-        const dev = num(r.xprof_p50_ms), wall = num(r.wall_clock_p50_ms);
-        if (dev != null && wall != null && wall >= dev) overheads.push(wall - dev);
-      });
-      if (ratios.length) {
-        const geo = Math.exp(ratios.reduce((s, x) => s + Math.log(x), 0) / ratios.length);
-        const pct = Math.round(geo * 100);
-        headline = `${pct}% of McJAX chip speed`;
-        badgeText = pct >= 97 ? "Matches McJAX" : `${pct}% vs McJAX`;
-      }
-      if (overheads.length) {
-        overheads.sort((a, b) => a - b);
-        const med = overheads[Math.floor(overheads.length / 2)];
-        sub = `${meta.desc} · +${med.toFixed(1)} ms proxy hop`;
-      }
+    let tipText = `<b>${meta.name}</b>\n${meta.desc}`;
+    if (overheads.length) {
+      overheads.sort((a, b) => a - b);
+      const med = overheads[Math.floor(overheads.length / 2)];
+      const minO = overheads[0], maxO = overheads[overheads.length - 1];
+      const kind = rt === "mcjax" ? "host dispatch" : "proxy hop";
+      sub = `${meta.desc} · +${med.toFixed(1)} ms ${kind} (wall p50 − chip p50)`;
+      tipText += `\n\n<b>How ${kind} is calculated:</b>\noverhead = Client Wall-Clock p50 − TPU Chip (XProf) p50\nMedian across ${overheads.length} cases: +${med.toFixed(2)} ms (range: +${minO.toFixed(2)} to +${maxO.toFixed(2)} ms)`;
     }
     const div = document.createElement("div");
     div.className = "kpi";
     div.innerHTML = `<div class="kpi-head"><span><span class="sw" style="background:${COLOR[rt]}"></span>${meta.name}</span><span class="badge">${badgeText}</span></div><div class="kpi-val">${headline}</div><div class="muted" style="font-size:12px">${sub}</div>`;
+    hover(div, tipText);
     kpiEl.appendChild(div);
   });
 })();
@@ -275,7 +278,7 @@ let currentMode = "thr";
 const MODE_HINTS = {
   thr: "Showing on-chip hardware speed from XProf traces. Higher bars = faster hardware execution.",
   dev: "Showing pure TPU chip execution time (XProf p50). Lower bars = faster.",
-  wall: "Showing total Python client wait time: solid = TPU chip time, striped top = Pathways proxy network hop.",
+  wall: "Proxy hop = Client Wall-Clock p50 − TPU Chip (XProf) p50. Solid bottom = chip time; striped top = proxy/host hop.",
 };
 
 function renderPanel(bench, mode) {
@@ -348,7 +351,7 @@ function renderPanel(bench, mode) {
         (t ? `\nHardware speed: <b>${f(t.v, 1)} ${t.u}</b>` : "") +
         (dev != null ? `\nTPU chip time (XProf p50): <b>${f(dev, 2)} ms</b>` : "\nTPU chip time: not captured") +
         (wall != null ? `\nTotal client wait (wall p50): <b>${f(wall, 2)} ms</b>` : "") +
-        (overhead != null ? `\nProxy / host overhead: <b>+${f(overhead, 2)} ms</b>` : "") +
+        (overhead != null ? `\nProxy / host hop (wall − chip): <b>+${f(overhead, 2)} ms</b> (${f(wall, 2)} − ${f(dev, 2)} ms)` : "") +
         (slice(r) ? `\nTPU slice: ${slice(r)}` : "");
 
       if (mode === "wall" && dev != null && wall != null && wall > dev) {

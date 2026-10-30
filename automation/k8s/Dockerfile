@@ -10,7 +10,7 @@
 FROM python:3.12-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
+  && apt-get install -y --no-install-recommends git curl ca-certificates gnupg gcc libc6-dev \
   && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
      | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
   && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
@@ -25,6 +25,10 @@ COPY templates/ /app/templates/
 COPY configs/ /app/configs/
 COPY src/accelerator_microbenchmarks/op_flags.yaml /app/src/accelerator_microbenchmarks/op_flags.yaml
 COPY automation/k8s/requirements.txt /app/requirements.txt
+
+RUN mkdir -p /opt/tpums \
+  && gcc -shared -fPIC -O2 -Wall -Wextra /app/automation/oss_patch/pjrt_profiler_patch.c \
+     -ldl -lpthread -o /opt/tpums/libpjrt_profiler_patch.so
 
 # pathwaysutils (PathwaysJobSet) pulls a CPU jax; the TPU wheels are not needed
 # to render manifests.

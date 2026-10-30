@@ -38,6 +38,7 @@ from typing import Any, Optional
 from automation import bq_writer
 from automation import dashboard
 from automation import metrics_aggregator
+from automation import oss_image_patcher
 from automation import report_generator
 from automation import runtimes as runtimes_lib
 from automation import utils
@@ -250,6 +251,8 @@ def run_pipeline(
     skip_cluster_credentials: bool = False,
     pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS,
     retries: int = utils.DEFAULT_RETRIES,
+    patch_oss_image: bool = False,
+    patched_server_image: str = oss_image_patcher.DEFAULT_PATCHED_SERVER_IMAGE,
 ) -> list[workload_submitter.BenchmarkResult]:
   """Executes the benchmark automation pipeline (Workload Submission, Metrics Aggregation, Report Generation)."""
   # Resolve the selection first so flag misuse fails before any GCS or
@@ -269,6 +272,14 @@ def run_pipeline(
   acc = workload_submitter.infer_configs_accelerator(config_files, accelerator)
   if runtimes is None:
     runtimes = workload_submitter.resolve_runtimes(None, suite_file)
+
+  if patch_oss_image:
+    runtimes = oss_image_patcher.maybe_patch_runtimes_on_the_fly(
+        runtimes,
+        enabled=True,
+        dry_run=dry_run,
+        patched_server_image=patched_server_image,
+    )
 
   if not dry_run and gcs_bucket:
     metrics_aggregator.verify_gcs_bucket_accessible(gcs_bucket)
@@ -490,6 +501,28 @@ def main(argv: Sequence[str]) -> None:
           " benchmark case in uBench's microbenchmark schema (default: none)."
       ),
   )
+  parser.add_argument(
+      "--patch-oss-image",
+      action=argparse.BooleanOptionalAction,
+      default=bool(os.environ.get("TPUMS_PATCH_OSS_IMAGE")),
+      help=(
+          "Dynamically patch the live OSS Pathways image"
+          " (us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest)"
+          " on the fly at the start of the run by injecting"
+          " libpjrt_profiler_patch.so for PJRT TPU profiler registration."
+      ),
+  )
+  parser.add_argument(
+      "--patched-server-image",
+      default=os.environ.get(
+          "TPUMS_PATCHED_SERVER_IMAGE",
+          oss_image_patcher.DEFAULT_PATCHED_SERVER_IMAGE,
+      ),
+      help=(
+          "Destination Artifact Registry repository (without tag) for the"
+          " on-the-fly patched OSS Pathways server image."
+      ),
+  )
 
   args = parser.parse_args(argv[1:])
   utils.validate_workload_args(args, require_cluster=True)
@@ -537,6 +570,8 @@ def main(argv: Sequence[str]) -> None:
       skip_cluster_credentials=args.skip_cluster_credentials,
       pod_priority_class=args.pod_priority_class,
       retries=args.retries,
+      patch_oss_image=args.patch_oss_image,
+      patched_server_image=args.patched_server_image,
   )
 
 

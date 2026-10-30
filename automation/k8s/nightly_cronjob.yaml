@@ -76,14 +76,14 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:latest
               imagePullPolicy: Always
               env:
-                # Use the cl/1010067962 Louhi image (PJRT profiler registered)
-                # until cl/1010067962 rolls out to cloud-pathways:latest.
-                - name: TPUMS_LOUHI_SERVER_IMAGE
+                # Dynamically patch the live OSS Louhi server image
+                # (us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest)
+                # on the fly at the start of every CronJob run by injecting the
+                # PJRT TPU profiler registration layer (libpjrt_profiler_patch.so).
+                - name: TPUMS_PATCH_OSS_IMAGE
+                  value: "1"
+                - name: TPUMS_PATCHED_SERVER_IMAGE
                   value: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server
-                - name: TPUMS_LOUHI_PROXY_IMAGE
-                  value: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/proxy_server
-                - name: TPUMS_LOUHI_VERSION
-                  value: cl-1010067962
               args:
                 - --cluster=pw-scale-test-v5e-32
                 - --project=cloud-tpu-multipod-dev
@@ -102,6 +102,7 @@ spec:
                 - --pod-priority-class=medium
                 - --suite-file=automation/canonical_suite_v5e.yaml
                 - --runtimes=mcjax,louhi,rapid
+                - --patch-oss-image
                 - --max-parallel=3
                 - --timeout-minutes=25
                 # A preempted or hung JobSet is deleted and resubmitted once.

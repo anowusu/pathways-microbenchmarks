@@ -114,6 +114,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
         <h2>Historical Trend Over Time (Hourly Runs)</h2>
         <div class="muted" id="history-sub">Tracks each runtime across hourly runs using the Metric and Statistic selected above. Use the size pills on each chart to switch workload size.</div>
       </div>
+      <div class="seg" role="tablist" aria-label="History window">
+        <button id="win-12" onclick="setHistoryWin(12)">Last 12h</button>
+        <button id="win-24" class="active" onclick="setHistoryWin(24)">Last 24h</button>
+        <button id="win-72" onclick="setHistoryWin(72)">Last 72h</button>
+        <button id="win-0" onclick="setHistoryWin(0)">All Runs</button>
+      </div>
     </div>
     <div id="history-charts" class="grid2"></div>
   </div>
@@ -520,16 +526,25 @@ function renderHistoryPanel(bench, mode, runs) {
   svg.appendChild(svgEl("line", { x1: left, x2: W - right, y1: yv(0), y2: yv(0), class: "axis" }));
 
   const fmtRunLbl = id => String(id || "").replace(/^20\d\d-/, "").replace(/ UTC$/, "").replace("T", " ").replace(/Z$/, "");
-  const stride = Math.max(1, Math.ceil(runs.length / (isWide ? 10 : 5)));
-  runs.forEach((snap, i) => {
-    const x = xv(i);
-    svg.appendChild(svgEl("line", { x1: x, x2: x, y1: top, y2: yv(0), class: "grid", "stroke-opacity": 0.25 }));
-    if (i % stride === 0 || i === runs.length - 1) {
-      svg.appendChild(svgEl("text", { x, y: H - 20, class: "lbl-x", "text-anchor": "middle", style: "font-size:10.5px" }, fmtRunLbl(snap.run_id)));
+  const maxTicks = isWide ? 7 : 4;
+  const numTicks = Math.min(runs.length, maxTicks);
+  const tickSet = new Set();
+  if (numTicks <= 1) {
+    tickSet.add(0);
+  } else {
+    for (let t = 0; t < numTicks; t++) {
+      tickSet.add(Math.round((t * (runs.length - 1)) / (numTicks - 1)));
     }
+  }
+  tickSet.forEach(i => {
+    const x = xv(i);
+    svg.appendChild(svgEl("line", { x1: x, x2: x, y1: top, y2: yv(0), class: "grid", "stroke-opacity": 0.35 }));
+    const anchor = (runs.length > 1 && i === 0) ? "start" : (runs.length > 1 && i === runs.length - 1) ? "end" : "middle";
+    svg.appendChild(svgEl("text", { x, y: H - 20, class: "lbl-x", "text-anchor": anchor, style: "font-size:10.5px" }, fmtRunLbl(runs[i].run_id)));
   });
   svg.appendChild(svgEl("text", { x: left + plotW / 2, y: H - 4, class: "lbl", "text-anchor": "middle" }, "Run timestamp (UTC)"));
 
+  const dotR = runs.length <= 24 ? 3.8 : runs.length <= 48 ? 2.4 : 0;
   const endLabels = [];
   RT.forEach(rt => {
     const pts = [];
@@ -544,7 +559,7 @@ function renderHistoryPanel(bench, mode, runs) {
       const d = pts.map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
       svg.appendChild(svgEl("path", { d, fill: "none", stroke: COLOR[rt], "stroke-width": 2.2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
     }
-    pts.forEach(p => {
+    pts.forEach((p, idx) => {
       const r = p.r;
       const dev = devTime(r), wall = wallTime(r), t = thrAt(r);
       const overhead = (dev != null && wall != null && wall > dev) ? (wall - dev) : null;
@@ -559,7 +574,15 @@ function renderHistoryPanel(bench, mode, runs) {
         devStats + wallStats +
         (overhead != null ? `\nWall − Chip (${st}): <b>+${sig5(overhead)} ms</b>` : "") +
         (slice(r) ? `\nTPU slice: ${slice(r)}` : "");
-      svg.appendChild(hover(svgEl("circle", { cx: p.x, cy: p.y, r: 4.5, fill: COLOR[rt], stroke: "var(--card)", "stroke-width": 1.5 }), tt));
+      const prevV = idx > 0 ? pts[idx - 1].v : p.v;
+      const nextV = idx + 1 < pts.length ? pts[idx + 1].v : p.v;
+      const isStepChange = Math.abs(p.v - prevV) / Math.max(Math.abs(prevV), 1e-9) > 0.015 ||
+                           Math.abs(p.v - nextV) / Math.max(Math.abs(nextV), 1e-9) > 0.015;
+      const showVisDot = dotR > 0 || idx === 0 || idx === pts.length - 1 || isStepChange;
+      if (showVisDot) {
+        svg.appendChild(svgEl("circle", { cx: p.x, cy: p.y, r: dotR || 3.2, fill: COLOR[rt], stroke: "var(--card)", "stroke-width": 1.2, "pointer-events": "none" }));
+      }
+      svg.appendChild(hover(svgEl("circle", { cx: p.x, cy: p.y, r: 6, fill: "transparent" }), tt));
     });
     if (pts.length) {
       const last = pts[pts.length - 1];
@@ -602,14 +625,28 @@ function renderHistoryPanel(bench, mode, runs) {
   return wrap;
 }
 
+let currentHistoryWin = 24;
+
 function renderHistory() {
-  const runs = (HISTORY && HISTORY.length) ? HISTORY : [{ run_id: "Current", rows: ROWS }];
+  const allRuns = (HISTORY && HISTORY.length) ? HISTORY : [{ run_id: "Current", rows: ROWS }];
+  const runs = (currentHistoryWin > 0 && allRuns.length > currentHistoryWin)
+    ? allRuns.slice(-currentHistoryWin)
+    : allRuns;
+  for (const w of [12, 24, 72, 0]) {
+    const el = document.getElementById("win-" + w);
+    if (el) {
+      el.classList.toggle("active", w === currentHistoryWin);
+      if (w === 0) el.textContent = `All Runs (${allRuns.length})`;
+    }
+  }
   document.getElementById("history-sub").textContent =
-    `Showing ${runs.length} recorded run${runs.length === 1 ? "" : "s"} (${runs[0].run_id} → ${runs[runs.length - 1].run_id}) using the Metric and Statistic selected above. Click a size pill on any chart to switch workload size.`;
+    `Showing ${runs.length} of ${allRuns.length} recorded run${allRuns.length === 1 ? "" : "s"} (${runs[0].run_id} → ${runs[runs.length - 1].run_id}) using the Metric and Statistic selected above. Click a size pill on any chart to switch workload size.`;
   const container = document.getElementById("history-charts");
   container.innerHTML = "";
   for (const b of BENCH) container.appendChild(renderHistoryPanel(b, currentMode, runs));
 }
+
+function setHistoryWin(w) { currentHistoryWin = w; renderHistory(); }
 
 function refreshAll() {
   for (const id of ["thr", "dev", "wall"]) {

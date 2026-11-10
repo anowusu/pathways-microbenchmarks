@@ -35,4 +35,4 @@ RUN mkdir -p /opt/tpums \
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 ENV PYTHONPATH=/app PYTHONUNBUFFERED=1 USE_GKE_GCLOUD_AUTH_PLUGIN=True
-ENTRYPOINT ["python", "-m", "automation.nightly_runner"]
+ENTRYPOINT ["python", "-m", "automation.daily.daily_runner"]

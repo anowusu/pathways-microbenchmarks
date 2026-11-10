@@ -30,24 +30,58 @@ import time
 
 DEFAULT_GCS_REPORTS = "gs://cloud-pathways-staging/tpums-nightly/reports"
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/tpums-dashboard")
+DEFAULT_ADC_FILE = os.path.expanduser(
+    "~/.config/gcloud/application_default_credentials.json"
+)
 DEFAULT_PORT = 8788
 SYNC_INTERVAL_SECONDS = 60
+
+_prefer_adc = True
+
+
+def _candidate_sync_envs() -> list[dict[str, str]]:
+  """Returns candidate environments for `gcloud storage rsync`."""
+  base_env = os.environ.copy()
+  if base_env.get("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE") or not os.path.isfile(
+      DEFAULT_ADC_FILE
+  ):
+    return [base_env]
+  adc_env = base_env.copy()
+  adc_env["CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"] = DEFAULT_ADC_FILE
+  return [adc_env, base_env] if _prefer_adc else [base_env, adc_env]
 
 
 def sync_reports(gcs_reports: str, cache_dir: pathlib.Path) -> None:
   """Rsyncs GCS report artifacts into `cache_dir`."""
+  global _prefer_adc
   cache_dir.mkdir(parents=True, exist_ok=True)
-  try:
-    subprocess.run(
-        ["gcloud", "storage", "rsync", gcs_reports, str(cache_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
-        stdin=subprocess.DEVNULL,
-        timeout=45,
-    )
-  except (OSError, subprocess.TimeoutExpired) as e:
-    logging.warning("GCS sync warning: %s", e)
+  cmd = ["gcloud", "storage", "rsync", gcs_reports, str(cache_dir)]
+  last_stderr = ""
+  for env in _candidate_sync_envs():
+    using_adc = env.get("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE") == DEFAULT_ADC_FILE
+    try:
+      proc = subprocess.run(
+          cmd,
+          env=env,
+          capture_output=True,
+          text=True,
+          check=False,
+          stdin=subprocess.DEVNULL,
+          timeout=45,
+      )
+    except (OSError, subprocess.TimeoutExpired) as e:
+      logging.warning("GCS sync warning: %s", e)
+      return
+    if proc.returncode == 0:
+      if using_adc != _prefer_adc:
+        logging.info(
+            "GCS sync succeeded using %s credentials.",
+            "ADC" if using_adc else "default gcloud",
+        )
+        _prefer_adc = using_adc
+      return
+    last_stderr = (proc.stderr or proc.stdout or "").strip()
+  logging.warning("GCS sync failed: %s", last_stderr)
 
 
 def _sync_loop(gcs_reports: str, cache_dir: pathlib.Path, interval: int) -> None:

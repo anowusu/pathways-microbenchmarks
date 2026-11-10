@@ -1,0 +1,21 @@
+# Cloud Build configuration for the daily Pathways metrics driver image.
+#   gcloud builds submit --project=cloud-tpu-multipod-dev \
+#     --config=automation/daily/k8s/cloudbuild.yaml \
+#     --substitutions=SHORT_SHA=$(git rev-parse --short HEAD) \
+#     --gcs-source-staging-dir=gs://cloud-pathways-staging/tpums-pathways-metrics-daily/build .
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - automation/k8s/Dockerfile
+      - -t
+      - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-pathways-metrics-daily:latest
+      - -t
+      - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-pathways-metrics-daily:$SHORT_SHA
+      - .
+images:
+  - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-pathways-metrics-daily:latest
+  - us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-pathways-metrics-daily:$SHORT_SHA
+options:
+  logging: CLOUD_LOGGING_ONLY

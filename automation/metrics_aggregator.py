@@ -131,6 +131,29 @@ CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
         "xprof_p50_ms",
         "xprof_tflops_per_device",
     ),
+    "pathways_overheads": (
+        "runtime",
+        "benchmark",
+        "mode",
+        "dtype",
+        "pipeline_depth",
+        "data_size_mib",
+        "matrix_dim",
+        "wall_clock_p50_ms",
+        "wall_clock_p90_ms",
+        "wall_clock_avg_ms",
+        "wall_clock_calls_per_s",
+        "wall_clock_bandwidth_per_device_gb_s",
+    ),
+    "colocated_python": (
+        "runtime",
+        "benchmark",
+        "execution_backend",
+        "direction",
+        "data_size_mib",
+        "wall_clock_p50_ms",
+        "wall_clock_bandwidth_per_host_gb_s",
+    ),
 }
 
 
@@ -159,6 +182,23 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("device_to_device", ("device_to_device",)),
     ("gemm", ("gemm",)),
+    (
+        "pathways_overheads",
+        (
+            "pathways_overheads",
+            "overheads",
+            "compile",
+            "dispatch",
+            "parity",
+        ),
+    ),
+    (
+        "colocated_python",
+        (
+            "colocated_python",
+            "sidecar",
+        ),
+    ),
 )
 
 SUPPORTED_CATEGORIES: tuple[str, ...] = tuple(

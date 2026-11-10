@@ -1,0 +1,127 @@
+# TPUMS Daily Pathways Benchmark Metrics Collection CronJob (R5).
+#
+# Apply:
+#   kubectl --context=gke_cloud-tpu-multipod-dev_us-south1_pw-scale-test-v5e-32 \
+#     apply -f automation/daily/k8s/daily_cronjob.yaml
+#
+# Manual trigger (Decision 9):
+#   kubectl --context=gke_cloud-tpu-multipod-dev_us-south1_pw-scale-test-v5e-32 \
+#     create job --from=cronjob/tpums-pathways-metrics-daily \
+#     tpmd-manual-$(date -u +%H%M%S) -n default
+#
+# Pod credentials (Decision 1): Uses pre-existing Workload-Identity-bound KSA
+# `default/default` (mapped to 735972712744-compute@developer.gserviceaccount.com)
+# with a dedicated Role + RoleBinding `tpums-pathways-metrics-daily`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tpums-pathways-metrics-daily
+  namespace: default
+  labels:
+    app: tpums-pathways-metrics-daily
+rules:
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tpums-pathways-metrics-daily
+  namespace: default
+  labels:
+    app: tpums-pathways-metrics-daily
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default
+roleRef:
+  kind: Role
+  name: tpums-pathways-metrics-daily
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tpums-pathways-metrics-daily
+  namespace: default
+  labels:
+    app: tpums-pathways-metrics-daily
+spec:
+  # Daily at 02:30 UTC — inside the hourly job's :20-:59 idle window.
+  schedule: "30 2 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 14
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    metadata:
+      labels:
+        app: tpums-pathways-metrics-daily
+    spec:
+      backoffLimit: 0
+      # At most 12 JobSets sequentially (--max-parallel=1), 25 min timeout each: <= 4h.
+      activeDeadlineSeconds: 14400
+      template:
+        metadata:
+          labels:
+            app: tpums-pathways-metrics-daily
+        spec:
+          serviceAccountName: default
+          restartPolicy: Never
+          nodeSelector:
+            cloud.google.com/gke-nodepool: default-pool
+          containers:
+            - name: driver
+              image: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-pathways-metrics-daily:latest
+              imagePullPolicy: Always
+              command: ["python", "-m", "automation.daily.daily_runner"]
+              env:
+                # Decision 3: Patching disabled. Consume the nightly's already-published
+                # patched Louhi server image pinned by sha256 digest.
+                - name: TPUMS_LOUHI_SERVER_IMAGE
+                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server@sha256:ed429f71766fa2b35fe1cad39669d4ac547f851c09727f45a4516a8e9bf5e8f6"
+                - name: TPUMS_LOUHI_PROXY_IMAGE
+                  value: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server"
+                - name: TPUMS_LOUHI_VERSION
+                  value: "jax-0.12.0.1"
+                # Decision 5: Distinct `tpmd-` JobSet name prefix and `app` label.
+                - name: TPUMS_WORKLOAD_PREFIX
+                  value: "tpmd"
+                - name: TPUMS_APP_LABEL
+                  value: "tpums-pathways-metrics-daily"
+              args:
+                - --cluster=pw-scale-test-v5e-32
+                - --project=cloud-tpu-multipod-dev
+                - --region=us-south1
+                - --zone=us-south1-a
+                - --namespace=default
+                - --queue=multislice-queue
+                - --priority=
+                - --pod-priority-class=medium
+                - --suite-file=automation/daily_suite_v5e.yaml
+                - --manifest-file=automation/daily/metrics_manifest.yaml
+                - --runtimes=mcjax,louhi
+                - --max-parallel=1
+                - --timeout-minutes=25
+                - --retries=1
+                - --git-repo=https://github.com/anowusu/pathways-microbenchmarks.git
+                - --git-branch=pathways-metrics-daily
+                - --docker-image=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+                - --gcs-bucket=gs://cloud-pathways-staging/tpums-pathways-metrics-daily
+                - --bq-table=cloud-tpu-multipod-dev.tpums_nightly.pathways_metrics_daily
+                - --upload-trace
+                - --skip-cluster-credentials
+                - --cleanup
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  memory: 4Gi

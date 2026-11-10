@@ -127,3 +127,7 @@ inference_sigmoid: *gemm_flags
 host_to_device: *host_device
 device_to_host: *host_device
 
+
+pathways_overheads:
+  flags:
+    - "--xla_tpu_dvfs_p_state=7"

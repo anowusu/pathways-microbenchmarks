@@ -442,15 +442,29 @@ def infer_topology_from_config(config_path: str) -> str:
   return topology
 
 
+DEFAULT_WORKLOAD_PREFIX = os.environ.get("TPUMS_WORKLOAD_PREFIX", "tpums")
+DEFAULT_APP_LABEL = os.environ.get("TPUMS_APP_LABEL", "")
+PATHWAYS_EXPORTER_DEBUG_ARG = (
+    "--temporary_flags_for_debugging="
+    "temporary_flag_for_debugging_enable_prometheus_exporter=true;;;"
+    "temporary_flag_for_debugging_prometheus_exporter_port=9090-9099;;;"
+    "temporary_flag_for_debugging_enable_metric_delta_log_exporter=true;;;"
+    "temporary_flag_for_debugging_metric_delta_log_exporter_interval=5s"
+)
+
+
 def sanitize_workload_name(
-    base_name: str, topology: str, max_len: int = 45
+    base_name: str,
+    topology: str,
+    max_len: int = 45,
+    prefix: str = DEFAULT_WORKLOAD_PREFIX,
 ) -> str:
   """Generates a safe DNS-compliant Kubernetes JobSet name incorporating topology without timestamps."""
   clean_base = re.sub(r"[^a-z0-9-]", "-", base_name.lower()).strip("-")
   clean_topo = re.sub(r"[^a-z0-9-]", "-", topology.lower()).strip("-")
   if clean_topo and clean_topo not in clean_base:
     clean_base = f"{clean_topo}-{clean_base}"
-  full_name = re.sub(r"-+", "-", f"tpums-{clean_base}").strip("-")
+  full_name = re.sub(r"-+", "-", f"{prefix}-{clean_base}").strip("-")
   return full_name[:max_len].rstrip("-")
 
 
@@ -460,24 +474,54 @@ PATHWAYS_WORKLOAD_NAME_MAX_LEN = 22
 
 
 def runtime_workload_name(
-    runtime: runtimes_lib.Runtime, config_name: str, topology: str
+    runtime: runtimes_lib.Runtime,
+    config_name: str,
+    topology: str,
+    prefix: str = DEFAULT_WORKLOAD_PREFIX,
 ) -> str:
-  """Returns the JobSet name of `config_name` on `runtime`.
-
-  McJAX names follow `sanitize_workload_name` (`tpums-<topology>-<runtime>-
-  <config>`, completed by `generateName`). Pathways names are
-  `tpums-<runtime>-<config>` truncated to `PATHWAYS_WORKLOAD_NAME_MAX_LEN`.
-
-  Args:
-    runtime: The runtime.
-    config_name: Config file stem, e.g. `all_gather`.
-    topology: Slice topology, e.g. `4x8`.
-  """
+  """Returns the JobSet name of `config_name` on `runtime`."""
   if not runtime.is_pathways:
-    return sanitize_workload_name(f"{runtime.name}-{config_name}", topology)
+    return sanitize_workload_name(
+        f"{runtime.name}-{config_name}", topology, prefix=prefix
+    )
   clean = re.sub(r"[^a-z0-9-]", "-", f"{runtime.name}-{config_name}".lower())
-  name = re.sub(r"-+", "-", f"tpums-{clean}").strip("-")
+  name = re.sub(r"-+", "-", f"{prefix}-{clean}").strip("-")
   return name[:PATHWAYS_WORKLOAD_NAME_MAX_LEN].rstrip("-")
+
+
+def inject_workload_labels(
+    manifest_yaml: str,
+    labels: Optional[dict[str, str]] = None,
+    extra_pathways_args: Optional[list[str]] = None,
+) -> str:
+  """Stamps `labels` onto JobSet, Job, and Pod metadata and optionally appends Pathways container args."""
+  eff_labels = dict(labels or {})
+  if DEFAULT_APP_LABEL and "app" not in eff_labels:
+    eff_labels["app"] = DEFAULT_APP_LABEL
+  if not eff_labels and not extra_pathways_args:
+    return manifest_yaml
+  doc = yaml.safe_load(manifest_yaml)
+  if not isinstance(doc, dict):
+    return manifest_yaml
+  if eff_labels:
+    doc.setdefault("metadata", {}).setdefault("labels", {}).update(eff_labels)
+  for rjob in doc.get("spec", {}).get("replicatedJobs", []) or []:
+    job_tmpl = rjob.setdefault("template", {})
+    if eff_labels:
+      job_tmpl.setdefault("metadata", {}).setdefault("labels", {}).update(eff_labels)
+    pod_tmpl = job_tmpl.setdefault("spec", {}).setdefault("template", {})
+    if eff_labels:
+      pod_tmpl.setdefault("metadata", {}).setdefault("labels", {}).update(eff_labels)
+    if extra_pathways_args:
+      pod_spec = pod_tmpl.get("spec", {}) or {}
+      for c in (pod_spec.get("initContainers") or []) + (pod_spec.get("containers") or []):
+        if c.get("name") in ("pathways-rm", "pathways-proxy", "pathways-worker"):
+          c_args = list(c.get("args") or [])
+          for arg in extra_pathways_args:
+            if arg not in c_args:
+              c_args.append(arg)
+          c["args"] = c_args
+  return yaml.safe_dump(doc, sort_keys=False)
 
 
 def retry_workload_name(base_name: str, attempt: int) -> str:
@@ -561,7 +605,13 @@ def generate_pathways_manifest(
       ),
       pod_priority_class=pod_priority_class,
   )
-  return yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
+  raw_yaml = yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
+  extra_pw_args = (
+      [PATHWAYS_EXPORTER_DEBUG_ARG]
+      if "pathways_overheads" in str(config_rel_path)
+      else None
+  )
+  return inject_workload_labels(raw_yaml, extra_pathways_args=extra_pw_args)
 
 
 def generate_jobset_manifest(
@@ -668,7 +718,7 @@ def generate_jobset_manifest(
         manifest,
     )
 
-  return manifest
+  return inject_workload_labels(manifest)
 
 
 def load_suite_runtimes(suite_path: str) -> list[str]:
@@ -770,8 +820,9 @@ def delete_jobset(workload_name: str, namespace: str) -> bool:
 
 def _delete_existing_jobset(
     workload_name: str, namespace: str, wait_seconds: int = 120
-) -> None:
-  """Deletes a JobSet of that name if present and waits until it is gone."""
+) -> float:
+  """Deletes a JobSet of that name if present and waits until it is gone; returns elapsed seconds."""
+  t0 = time.perf_counter()
   proc = subprocess.run(
       [
           "kubectl",
@@ -795,10 +846,15 @@ def _delete_existing_jobset(
         f"Could not delete the existing JobSet {workload_name}:"
         f" {(proc.stderr or '').strip()}"
     )
+  elapsed_s = time.perf_counter() - t0
   if "deleted" in proc.stdout:
     logging.warning(
-        "Deleted a leftover JobSet %s before re-creating it.", workload_name
+        "Deleted a leftover JobSet %s before re-creating it (%.2fs).",
+        workload_name,
+        elapsed_s,
     )
+    return elapsed_s
+  return 0.0
 
 
 PROVENANCE_FILE = "provenance.json"
@@ -919,6 +975,7 @@ _DIGEST_CONTAINERS: dict[str, str] = {
     "pathways-rm": "pathways_server_digest",
     "pathways-worker": "pathways_server_digest",
     "pathways-proxy": "pathways_proxy_digest",
+    "colocated-python-sidecar": "pathways_sidecar_digest",
     "user-workload": "client_image_digest",
     "jax-tpu": "client_image_digest",
 }
@@ -1297,6 +1354,10 @@ class WorkloadManager:
   # How many times a failed or timed-out workload is resubmitted (its JobSet
   # is deleted first; results of the last attempt count).
   retries: int = 0
+  workload_prefix: str = DEFAULT_WORKLOAD_PREFIX
+  on_workload_terminal: Optional[
+      Callable[[ActiveWorkload, Optional[dict[str, Any]], list[dict[str, Any]]], None]
+  ] = None
 
   active_workloads: dict[str, ActiveWorkload] = dataclasses.field(
       default_factory=dict
@@ -1308,6 +1369,7 @@ class WorkloadManager:
   provenance_by_runtime: dict[str, dict[str, Any]] = dataclasses.field(
       default_factory=dict
   )
+  _notified_terminal: set[str] = dataclasses.field(default_factory=set)
 
   def _provenance(self, runtime: runtimes_lib.Runtime) -> dict[str, Any]:
     """Resolves (once per runtime) the images and commit a runtime runs."""
@@ -1356,7 +1418,9 @@ class WorkloadManager:
               " submitted."
           )
         topology = infer_topology_from_config(rel_path)
-        workload_name = runtime_workload_name(runtime, config_name, topology)
+        workload_name = runtime_workload_name(
+            runtime, config_name, topology, prefix=self.workload_prefix
+        )
         if workload_name in prepared:
           raise ValueError(
               f"Duplicate sanitized workload name {workload_name!r} for config"
@@ -1521,7 +1585,8 @@ class WorkloadManager:
       if wl.fixed_name:
         # A leftover JobSet of the same name (e.g. from an interrupted
         # night) would make `kubectl create` fail.
-        _delete_existing_jobset(name, self.namespace)
+        pre_del_s = _delete_existing_jobset(name, self.namespace)
+        wl.provenance["pre_delete_seconds"] = round(pre_del_s, 3)
       wl.start_time = time.time()
       wl.workload_name = apply_jobset(wl.manifest_yaml)
       key = wl.workload_name
@@ -1658,6 +1723,18 @@ class WorkloadManager:
       # Before cleanup deletes the pods: their image digests go into
       # provenance.json.
       self._refresh_provenance()
+      if self.on_workload_terminal is not None:
+        for name, wl in list(self.active_workloads.items()):
+          if wl.terminal and name not in self._notified_terminal:
+            self._notified_terminal.add(name)
+            try:
+              self.on_workload_terminal(
+                  wl, jobsets_data.get(name), pods_data.get(name, [])
+              )
+            except Exception:  # pylint: disable=broad-exception-caught
+              logging.exception(
+                  "on_workload_terminal callback failed for %s", name
+              )
       if self.retries and self._requeue_failed():
         _clear_dashboard()
         all_done = False
@@ -1791,6 +1868,10 @@ def submit_workloads(
     max_parallel: Optional[int] = None,
     pod_priority_class: str = utils.DEFAULT_POD_PRIORITY_CLASS,
     retries: int = utils.DEFAULT_RETRIES,
+    workload_prefix: str = DEFAULT_WORKLOAD_PREFIX,
+    on_workload_terminal: Optional[
+        Callable[[ActiveWorkload, Optional[dict[str, Any]], list[dict[str, Any]]], None]
+    ] = None,
 ) -> list[BenchmarkResult]:
   """Prepares and submits all targeted configs on every runtime in parallel."""
   manager = WorkloadManager(
@@ -1814,6 +1895,8 @@ def submit_workloads(
       max_parallel=max_parallel,
       pod_priority_class=pod_priority_class,
       retries=retries,
+      workload_prefix=workload_prefix,
+      on_workload_terminal=on_workload_terminal,
   )
   return manager.run(config_files)
 

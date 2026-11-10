@@ -34,6 +34,7 @@ class PlatformInfo:
   jax_version: str
   jaxlib_version: str
   libtpu_version: str
+  pathwaysutils_version: str = "unknown"
 
 
 def _get_package_version(module_name: str, *fallback_pkg_names: str) -> str:
@@ -173,4 +174,5 @@ def get_platform_info() -> PlatformInfo:
       jax_version=_get_package_version("jax"),
       jaxlib_version=_get_package_version("jaxlib"),
       libtpu_version=_get_package_version("libtpu", "libtpu-nightly"),
+      pathwaysutils_version=_get_package_version("pathwaysutils"),
   )

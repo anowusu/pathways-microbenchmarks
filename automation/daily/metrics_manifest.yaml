@@ -1,0 +1,1230 @@
+# Pathways Benchmarking Metrics Manifest (M1 -> M3 -> M4 Contract)
+# 86 total entries: 23 full + 63 brief across 7 layers (CP, RM, WK, DP, ST, CO, PV) + Parity (PA)
+
+# ==============================================================================
+# Layer 1: Client / Proxy (CP-01 .. CP-12)
+# ==============================================================================
+- id: CP-01
+  name: "Proxy hop per case (client wall p50 - device p50, McJAX-normalised)"
+  layer: client_proxy
+  tier: full
+  dimensions: [D1]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: ms
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: CP-02
+  name: "Client-to-proxy-to-worker latency decomposition from head-pod XProf files (per-RPC RTT + proxy critical path)"
+  layer: client_proxy
+  tier: full
+  dimensions: [D1, D3]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: traceme
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: CP-03
+  name: "Async dispatch depth and pipelined dispatch throughput (in-flight sweep)"
+  layer: client_proxy
+  tier: full
+  dimensions: [D1]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: calls/s
+  priority: P0
+  effort: M
+  home: tpums_nightly
+
+- id: CP-04
+  name: "IFRT-proxy serialisation cost: program bytes on compile and host-buffer upload/download wire bandwidth"
+  layer: client_proxy
+  tier: full
+  dimensions: [D3, D4]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: traceme
+  unit: GB/s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: CP-05
+  name: "Single-stream back-pressure: time blocked in grpc_stream_write per step and per case"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D1]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: traceme
+  unit: ms
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: CP-06
+  name: "RPC batching efficiency: client periodic-flush count and batch sizes (proxy_periodic_flush, batch_delete, batch_destruct)"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D1]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: traceme
+  unit: count
+  priority: P2
+  effort: M
+  home: tpums_nightly
+
+- id: CP-07
+  name: "Result-path cost: number and latency of check_future / check_value_ready / loaded_executable_fetch_execute_result RPCs per execute"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D1]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: traceme
+  unit: ms
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: CP-08
+  name: "Client bring-up: jax.devices() and proxy session creation time (IfrtProxyEntrypointClientCreate, init RPC)"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D7, D1]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: CP-09
+  name: "Compile round trip through the proxy: compile RPC RTT and IfrtProxyEntrypointCompilerCompile vs proxy Compiler::Compile"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D3, D8]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: CP-10
+  name: "Device-to-client fetch bandwidth (copy_to_host_buffer RPC and proxy HostBufferLookup_Send) by size and sharding"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D3, D4]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: GB/s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: CP-11
+  name: "Client-side transfer concurrency knobs (grpc_max_ongoing_host_buffer_stores/lookups) as sweep dimensions"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D3]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "compile-time constants in OSS IFRT proxy client (global_flags.h:26-30); no env or flag mechanism exists without a jaxlib binary change"
+  method: client_timer
+  unit: GB/s
+  priority: P3
+  effort: L
+  home: "other:Upstream IFRT-proxy (XLA) feature request"
+
+- id: CP-12
+  name: "TPU idle fraction between consecutive executions (proxy-induced starvation proxy) on /device:TPU:0 for a dispatch-bound loop"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D1]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: pct
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+# ==============================================================================
+# Layer 2: Resource Manager / Scheduler (RM-01 .. RM-13)
+# ==============================================================================
+- id: RM-01
+  name: "Cluster-ready time: RM ListDevices wait for worker registration, plus client bring-up"
+  layer: rm_scheduler
+  tier: full
+  dimensions: [D2, D7]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: server_log
+  unit: s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: RM-02
+  name: "Scheduler placement latency and proxy-to-RM command latency (exporter probe)"
+  layer: rm_scheduler
+  tier: full
+  dimensions: [D2]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires enabling OSS Prometheus/log exporter via --temporary_flags_for_debugging on pathways-rm and pathways-proxy containers"
+  method: server_log
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: RM-03
+  name: "Worker-side dispatch latency chain: client-to-scheduler, scheduler-to-worker, RPC queue and process time"
+  layer: rm_scheduler
+  tier: full
+  dimensions: [D1, D2]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: traceme
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: RM-04
+  name: "Elastic slice-loss recovery timeline on the client (pathwaysutils elastic manager)"
+  layer: rm_scheduler
+  tier: full
+  dimensions: [D6, D2]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "needs >=2 TPU slices (--num_elastic_instances>=1) and controlled worker-pod fault injection outside the single-slice TPUMS envelope"
+  method: server_log
+  unit: s
+  priority: P1
+  effort: L
+  home: "other:Kokoro elastic_training_test / dedicated Pathways resilience suite"
+
+- id: RM-05
+  name: "RM/scheduler health on (re-)admission: head restarts and the registration-mismatch crash signature"
+  layer: rm_scheduler
+  tier: full
+  dimensions: [D2, D6]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: server_log
+  unit: count
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: RM-06
+  name: "Transport pipe health between proxy, scheduler, and workers (/learning/pathways/pipe/* latencies and bytes)"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D2]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "depends on OSS Prometheus/log exporter activation via --temporary_flags_for_debugging (RM-02 probe)"
+  method: server_log
+  unit: us
+  priority: P2
+  effort: M
+  home: tpums_nightly
+
+- id: RM-07
+  name: "RM chip-second utilisation: available_chip_sec vs used_chip_sec over the JobSet lifetime"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D2]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "depends on OSS Prometheus/log exporter activation on pathways-rm via --temporary_flags_for_debugging"
+  method: server_log
+  unit: chip_s
+  priority: P2
+  effort: M
+  home: "other:Shared Pathways Service (SPS) / Cloud Monitoring"
+
+- id: RM-08
+  name: "Compilation-mode and environment provenance from RM/proxy (compilation_mode, /learning/pathways/client/count)"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D2, D12]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "depends on OSS Prometheus/log exporter activation on pathways-rm and pathways-proxy via --temporary_flags_for_debugging"
+  method: server_log
+  unit: string
+  priority: P2
+  effort: M
+  home: tpums_nightly
+
+- id: RM-09
+  name: "Placement and registration event timeline from RM logs (AddJobInstance, Registering device set, DeviceSet placed) — worker join skew"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D2, D7]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: server_log
+  unit: s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: RM-10
+  name: "In-flight cap sensitivity: pathways_xla_max_inflight_async_computations sweep ({8, 32, 128}) effect on dispatch throughput and queueing"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D1, D2]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires per-variant JobSets passing temporary_flag_for_debugging_xla_max_inflight_async_computations on pathways-worker args"
+  method: client_timer
+  unit: calls/s
+  priority: P2
+  effort: M
+  home: tpums_nightly
+
+- id: RM-11
+  name: "Worker-to-RM health heartbeat interval and unhealthy-host flags"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D6, D12]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: server_log
+  unit: s
+  priority: P3
+  effort: S
+  home: tpums_nightly
+
+- id: RM-12
+  name: "RM-side suspend/resume and migration timings under preemption (migration_latency, suspended_duration, slice_context_switch_latency)"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D6]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "needs a real multi-slice preemption/suspend event and the OSS metrics exporter probe"
+  method: server_log
+  unit: s
+  priority: P2
+  effort: L
+  home: "other:Pathways resilience suite (with RM-04)"
+
+- id: RM-13
+  name: "RM request handling spans AddClient and AddDeviceSet in server-<head>.xplane.pb"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D7, D2]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "TPUMS starts jax.profiler.trace after client creation; requires starting profiler trace before jax.devices() bring-up"
+  method: traceme
+  unit: ms
+  priority: P3
+  effort: S
+  home: tpums_nightly
+
+# ==============================================================================
+# Layer 3: Worker / TPU (WK-01 .. WK-14)
+# ==============================================================================
+- id: WK-01
+  name: "TPU device-time parity of the five TPUMS kernels ('chip speed' ratio Pathways / McJAX)"
+  layer: worker_tpu
+  tier: full
+  dimensions: [D1, D5]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: ratio
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: WK-02
+  name: "gemm device p50 and TFLOP/s per chip (m in {8192,16384,32768}, k=n=4096, bf16)"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D1]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: TFLOP/s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: WK-03
+  name: "hbm copy bandwidth GB/s per device (67M to 537M bf16 elements)"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D11]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: GB/s
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: WK-04
+  name: "all_gather ICI bandwidth GB/s per chip (dim 8192/16384/32768)"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D5]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: GB/s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: WK-05
+  name: "all_reduce ICI bandwidth GB/s per chip (dim 131072/262144/524288)"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D5]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: GB/s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: WK-06
+  name: "all_to_all ICI bandwidth GB/s per chip and ICI roofline efficiency"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D5]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: xprof_plane
+  unit: GB/s
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: WK-07
+  name: "Cold vs warm XLA compile time as seen by the client, and the Pathways persistent-cache effect"
+  layer: worker_tpu
+  tier: full
+  dimensions: [D8]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: WK-08
+  name: "Proxy persistent-cache hit/miss and lookup latency; compile-service compile time"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D8]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "streamz metrics readable only via OSS Prometheus/log exporter behind --temporary_flags_for_debugging"
+  method: server_log
+  unit: ms
+  priority: P1
+  effort: M
+  home: "other:GKE Managed Prometheus / exporter scrape"
+
+- id: WK-09
+  name: "AOT compile and load time: compile-only proxy (--virtual_instances) to serialized executable to DeserializeLoadedExecutable"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D8]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "needs a compile-only proxy JobSet (--virtual_instances) and an AOT harness; not in the first run"
+  method: client_timer
+  unit: s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: WK-10
+  name: "Compiled HBM footprint per executable (static) and pod host memory; runtime HBM usage not observable on Pathways"
+  layer: worker_tpu
+  tier: full
+  dimensions: [D11, D4, PA]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: MiB
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: WK-11
+  name: "Runtime HBM usage on Pathways (bytes_in_use, peak_bytes_in_use via device.memory_stats())"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D11]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "PyDevice::MemoryStats (py_device.cc:156) requires ifrt::PjRtDevice; IFRT-proxy client devices raise InvalidArgument without an upstream allocator-stats RPC"
+  method: client_timer
+  unit: MiB
+  priority: P2
+  effort: L
+  home: "other:IFRT-proxy / Pathways team feature request"
+
+- id: WK-12
+  name: "Worker-side execution envelope: ProcessExamples span vs device time on the traced worker"
+  layer: worker_tpu
+  tier: full
+  dimensions: [D1]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: traceme
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: WK-13
+  name: "In-flight async computation depth sweep: wall-clock throughput of back-to-back small gemms at max_inflight 1/8/32"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D1]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "needs per-variant worker JobSets with --temporary_flags_for_debugging; not in the first run"
+  method: client_timer
+  unit: calls/s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: WK-14
+  name: "Slowest-host device time across all 8 workers (multi-host XProf max_num_hosts=8 on Pathways)"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D1, D5]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "requires verifying that pathwaysutils.profiling.start_trace(max_num_hosts=8) uploads all 8 worker .xplane.pb files on Louhi"
+  method: xprof_plane
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+# ==============================================================================
+# Layer 4: Data Path & Sidecar (DP-01 .. DP-06, DP-10 .. DP-19)
+# ==============================================================================
+- id: DP-01
+  name: "Client-to-device and device-to-client transfer bandwidth on Pathways vs host-to-device PCIe on McJAX (TPUMS host_to_device/device_to_host)"
+  layer: datapath_sidecar
+  tier: full
+  dimensions: [D4, D11]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: GB/s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: DP-02
+  name: "Multi-slice DCN collective bandwidth (dcn_all_reduce) on Pathways vs McJAX multislice"
+  layer: datapath_sidecar
+  tier: full
+  dimensions: [D5]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "needs multi-slice capacity: 2-slice JobSet templates for Pathways (num_slices=2) and McJAX (MEGASCALE_* env), and a 64-chip Kueue admission alongside the hourly job"
+  method: xprof_plane
+  unit: GB/s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: DP-03
+  name: "MXLA Cloud Monitoring CDFs: DCN transfer latency/size, collective end-to-end latency, H2D/D2H transfer latency (multislice workloads)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D5, D4]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "needs multi-slice capacity (DP-02); MXLA exports dcn_transfer_latencies only for multislice workloads"
+  method: server_log
+  unit: ms
+  priority: P1
+  effort: S
+  home: "other:Cloud Monitoring / Metrics Explorer (GKE-native)"
+
+- id: DP-04
+  name: "Transfer leg split on Pathways: client-to-proxy upload vs proxy-to-worker vs completion, from client and proxy xplane files"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D4, D3]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires verifying that the client xplane of a traced host_to_device run carries IfrtProxyEntrypointMakeArrayFromHostBuffer and GrpcClientHostBufferStore spans"
+  method: traceme
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: DP-05
+  name: "Pathways RPC transport bytes and latency (proxy-to-worker, worker-to-worker via /learning/pathways/transport/rpc/*)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D5]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "depends on OSS Prometheus/log exporter activation via --temporary_flags_for_debugging"
+  method: server_log
+  unit: ms
+  priority: P2
+  effort: M
+  home: "other:GKE Managed Prometheus / exporter scrape"
+
+- id: DP-06
+  name: "Replicated vs fully-sharded device_put bandwidth (HostBufferBroadcastTransfer vs HostBufferPartitionedTransfer strategy)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D4]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: GB/s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: DP-10
+  name: "Sidecar Proposal #1: Produce bandwidth (sidecar -> CPU devices -> TPU), sizes {1,16,128,1024} MiB/device, fill on/off, 1 vs 8 hosts"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D4]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "requires JobSet sidecar container attachment (--sidecar_name=external + colocated_python_sidecar:jax-0.12.0) in the daily runner"
+  method: client_timer
+  unit: GB/s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: DP-11
+  name: "Sidecar Proposal #2: No-op RTT and pipelined call rate vs fan-out (1/4/32 CPU devices), pipeline_depth 1 and 32"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D1]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "requires JobSet sidecar container attachment (--sidecar_name=external + colocated_python_sidecar:jax-0.12.0) in the daily runner"
+  method: client_timer
+  unit: calls/s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: DP-12
+  name: "Sidecar Proposal #3: CPU compute inside the sidecar (work_mib float32 sort, 1/4/16 calls in flight)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "requires JobSet sidecar container attachment (--sidecar_name=external + colocated_python_sidecar:jax-0.12.0) in the daily runner"
+  method: client_timer
+  unit: MiB/s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: DP-13
+  name: "Sidecar Proposal #4: Consume bandwidth (TPU -> CPU devices -> sidecar reads shards)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D4]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "requires JobSet sidecar container attachment (--sidecar_name=external + colocated_python_sidecar:jax-0.12.0) in the daily runner"
+  method: client_timer
+  unit: GB/s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: DP-14
+  name: "Sidecar Proposal #5: Cold start (first call of fresh function with 0/4 MiB closure; sidecar container ready time from pod events)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D7]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "requires JobSet sidecar container attachment for client cold-start timers and k8s pod-event scraping for sidecar container readiness"
+  method: client_timer
+  unit: s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: DP-15
+  name: "Sidecar Proposal #6: SHM vs gRPC-chunk, UDS vs TCP transport variants of #1 and #2"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D4]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "requires a separate SHM-off / TCP-transport JobSet spec variant stripping --cloud_pathways_sidecar_shm_directory; deferred beyond first daily run"
+  method: client_timer
+  unit: GB/s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: DP-16
+  name: "Sidecar Proposal #7: Interference (gemm XProf step time while the sidecar runs CPU compute #3 in a loop on every host)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "needs background sidecar-dispatch harness integrated into the TPUMS gemm measurement loop (Phase 3)"
+  method: xprof_plane
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: DP-17
+  name: "Sidecar Proposal #8: Deployment/image matrix (Louhi vs dev sidecar, jax-0.12.0 vs 0.12.0.1, sidecar_container vs inprocess_sidecar unified_containers=True)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D12]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "multi-JobSet image matrix; unified in-process sidecar stack (cl/1014437477, cl/1014437480) is still pending"
+  method: client_timer
+  unit: GB/s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: DP-18
+  name: "Sidecar Proposal #9: Sidecar resource limits sweep (CPU 8/32/none, memory, shm_size_limit tmpfs)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D11]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "resource-limit sweep requires multiple dedicated JobSets per CPU/shm_size_limit cell (Phase 3)"
+  method: client_timer
+  unit: GB/s
+  priority: P2
+  effort: M
+  home: tpums_nightly
+
+- id: DP-19
+  name: "Sidecar Proposal #10: Realistic loader/restore (Grain pipeline in layered sidecar image or Orbax restore with load_with_colocated_python: true)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D9]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "needs a custom layered sidecar image with Grain (image push forbidden by R4) or the external Orbax XPK benchmark harness"
+  method: client_timer
+  unit: GB/s
+  priority: P2
+  effort: L
+  home: "other:Orbax Checkpoint Benchmark Harness / MaxText e2e"
+
+# ==============================================================================
+# Layer 5: Storage / Checkpointing (ST-01 .. ST-08)
+# ==============================================================================
+- id: ST-01
+  name: "Orbax checkpoint save & restore throughput (GB/s) and async blocking duration on Pathways vs McJAX"
+  layer: storage_ckpt
+  tier: full
+  dimensions: [D9, D6]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: GB/s
+  priority: P1
+  effort: M
+  home: "other:Orbax Checkpoint Benchmark Harness (launch_xpk.py --enable_pathways) for model-scale; TPUMS daily for 512 MiB client-path canary"
+
+- id: ST-02
+  name: "Pathways GCS scratch & persistent compilation cache I/O footprint and lookup overhead (--gcs_scratch_location/compilation_cache)"
+  layer: storage_ckpt
+  tier: full
+  dimensions: [D9, D8]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: gcs_artifact
+  unit: MiB
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: ST-03
+  name: "Multi-tier / emergency checkpoint local-RAMfs write and primary-slice broadcast latency"
+  layer: storage_ckpt
+  tier: brief
+  dimensions: [D9, D6]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "needs multitier-checkpoint.csi.storage.gke.io CSI volume, colocated Python sidecar, and >=2 TPU slices"
+  method: client_timer
+  unit: s
+  priority: P2
+  effort: L
+  home: "other:Kokoro multi_tier_checkpointing_tests / Orbax emergency_checkpoint_manager_benchmark.py"
+
+- id: ST-04
+  name: "Pathways-native worker persistence bulk write/read throughput (pathwaysutils.persistence.helper)"
+  layer: storage_ckpt
+  tier: brief
+  dimensions: [D9]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "needs a pathwaysutils.persistence plugin-executable benchmark harness not present in the TPUMS library"
+  method: client_timer
+  unit: GB/s
+  priority: P1
+  effort: M
+  home: "other:Orbax / pathwaysutils.persistence benchmark"
+
+- id: ST-05
+  name: "Elastic suspend/resume TensorStore scratch write volume and fallback rate"
+  layer: storage_ckpt
+  tier: brief
+  dimensions: [D9, D6]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "needs an elastic slice suspend event (--num_elastic_instances>0 + preemption) to trigger TensorStore scratch writes"
+  method: gcs_artifact
+  unit: MiB
+  priority: P2
+  effort: L
+  home: "other:Pathways resilience suite (with RM-04/RM-12)"
+
+- id: ST-06
+  name: "GCSFuse CSI volume mount read/write throughput inside worker/sidecar pods"
+  layer: storage_ckpt
+  tier: brief
+  dimensions: [D9]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "requires modifying JobSet spec with add_gcsfuse (gke-gcsfuse/volumes: true) and a CSI-enabled pod restart"
+  method: client_timer
+  unit: GB/s
+  priority: P2
+  effort: M
+  home: "other:uBench storage recipe / Orbax benchmark harness"
+
+- id: ST-07
+  name: "XProf trace-upload storage latency and GCS artifact volume (StoreTrace to load_trace visibility)"
+  layer: storage_ckpt
+  tier: brief
+  dimensions: [D9]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: gcs_artifact
+  unit: MiB
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: ST-08
+  name: "Orbax checkpoint directory-creation, step-cleanup, and global-barrier overhead"
+  layer: storage_ckpt
+  tier: brief
+  dimensions: [D9]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "multi-step checkpoint rotation (remove_steps_duration_secs) requires a multi-step training loop in the Orbax benchmark harness"
+  method: client_timer
+  unit: s
+  priority: P2
+  effort: S
+  home: "other:Orbax Checkpoint Benchmark Harness"
+
+# ==============================================================================
+# Layer 6: Cluster / Orchestration (CO-01 .. CO-10)
+# ==============================================================================
+- id: CO-01
+  name: "End-to-end JobSet startup & readiness phase decomposition (Kueue admit -> head Ready -> worker serving -> RM device-set ready -> benchmark start)"
+  layer: cluster_orch
+  tier: full
+  dimensions: [D7, D6]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: k8s_event
+  unit: s
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: CO-02
+  name: "Kueue multi-flavor admission wait and cpu-np head-pod CPU contention vs TPU slice availability"
+  layer: cluster_orch
+  tier: full
+  dimensions: [D7]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: k8s_event
+  unit: s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: CO-03
+  name: "JobSet preemption & failure-recovery restart time (restartStrategy: Recreate and InOrder teardown/re-bringup)"
+  layer: cluster_orch
+  tier: full
+  dimensions: [D6]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: k8s_event
+  unit: s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: CO-04
+  name: "Worker Kubernetes readiness-probe blind spot (time between worker pod Ready=True and actual Pathways Server serving on)"
+  layer: cluster_orch
+  tier: brief
+  dimensions: [D7]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: server_log
+  unit: s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: CO-05
+  name: "Container image pull & verification latency under image_pull_policy=Always across head and worker pods"
+  layer: cluster_orch
+  tier: brief
+  dimensions: [D7]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: k8s_event
+  unit: s
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: CO-06
+  name: "user-workload in-pod git clone + pip install harness setup overhead"
+  layer: cluster_orch
+  tier: brief
+  dimensions: [D7]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: k8s_event
+  unit: s
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: CO-07
+  name: "TPU slice node-pool placement & hardware heterogeneity impact (pod_node_pools and broken pool np-18 audit)"
+  layer: cluster_orch
+  tier: brief
+  dimensions: [D7, D12]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: k8s_event
+  unit: string
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: CO-08
+  name: "Fixed 22-character Pathways JobSet name collision and pre-delete teardown latency"
+  layer: cluster_orch
+  tier: brief
+  dimensions: [D6, D7]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: s
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: CO-09
+  name: "Worker node /tmp hostPath (shared-tmp) and /dev/shm disk/tmpfs utilization across runs"
+  layer: cluster_orch
+  tier: brief
+  dimensions: [D7, D11]
+  runtimes: [mcjax, louhi]
+  collectable_today: false
+  blocker: "user-workload runs on cpu-np head node, not on the TPU worker nodes where shared-tmp hostPath is mounted; requires a worker-node probe or kubelet stats scrape"
+  method: k8s_event
+  unit: MiB
+  priority: P3
+  effort: M
+  home: tpums_nightly
+
+- id: CO-10
+  name: "Coordinator DNS and InOrder startup policy serialization overhead (worker creationTimestamp minus head creationTimestamp)"
+  layer: cluster_orch
+  tier: brief
+  dimensions: [D7]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: k8s_event
+  unit: s
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+# ==============================================================================
+# Layer 7: Provenance (PV-01 .. PV-08)
+# ==============================================================================
+- id: PV-01
+  name: "Container image digest & build-tag lineage across server, proxy, sidecar, and client vs broken platform_version (Changelist()='42', b/454431879)"
+  layer: provenance
+  tier: full
+  dimensions: [D12]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: version_banner
+  unit: digest
+  priority: P0
+  effort: S
+  home: tpums_nightly
+
+- id: PV-02
+  name: "Effective runtime flag, environment, and client-vs-worker version-skew provenance (STARTUP: dump vs PlatformInfo and op_flags.yaml)"
+  layer: provenance
+  tier: full
+  dimensions: [D12]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: server_log
+  unit: string
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: PV-03
+  name: "Patched Louhi server image lineage: mapping runtime digest to upstream cloud-pathways/server base digest"
+  layer: provenance
+  tier: brief
+  dimensions: [D12]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: version_banner
+  unit: digest
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: PV-04
+  name: "pathwaysutils and client Python package version provenance (pathwaysutils.__version__)"
+  layer: provenance
+  tier: brief
+  dimensions: [D12]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: version_banner
+  unit: string
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: PV-05
+  name: "Worker PJRT TPU client configuration provenance (PjRtTpuClientConfig)"
+  layer: provenance
+  tier: brief
+  dimensions: [D12]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "must check whether PjRtTpuClientConfig operator<< (max_inflight_computations=) is logged at default INFO level in pathways-worker logs"
+  method: server_log
+  unit: string
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: PV-06
+  name: "Server-exported compilation cache & client environment provenance metrics (compilation_cache_storage_type, client/count)"
+  layer: provenance
+  tier: brief
+  dimensions: [D12]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "depends on OSS Prometheus/log exporter activation via --temporary_flags_for_debugging (RM-02/RM-08 probe)"
+  method: server_log
+  unit: string
+  priority: P2
+  effort: M
+  home: tpums_nightly
+
+- id: PV-07
+  name: "Colocated Python sidecar container digest and wire-protocol version provenance (kSidecarClientMinVersion)"
+  layer: provenance
+  tier: brief
+  dimensions: [D12]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: version_banner
+  unit: digest
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+- id: PV-08
+  name: "Artifact Registry daily build-timestamp and JAX-version tag-matrix provenance (<YYYYMMDD>-jax_<ver>)"
+  layer: provenance
+  tier: brief
+  dimensions: [D12]
+  runtimes: [louhi]
+  collectable_today: true
+  blocker: null
+  method: version_banner
+  unit: string
+  priority: P2
+  effort: S
+  home: tpums_nightly
+
+# ==============================================================================
+# Parity / Numerical Correctness (PA-01 .. PA-05)
+# ==============================================================================
+- id: PA-01
+  name: "Cross-runtime bit-exact checksum of the gemm_chained output (McJAX is the reference)"
+  layer: parity
+  tier: full
+  dimensions: [PA]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "requires verifying that experimental GemmChainedBenchmark and gather_and_compare_checksums execute cleanly on the IFRT proxy backend on TPU v5e 4x8"
+  method: client_timer
+  unit: bool
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: PA-02
+  name: "Tolerance (allclose) and SHA-256 hash comparison of fixed-seed outputs of the five TPUMS kernels across runtimes"
+  layer: parity
+  tier: brief
+  dimensions: [PA]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: client_timer
+  unit: bool
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: PA-03
+  name: "Server-side output hashing via the IFRT HashValues primitive (no host copy)"
+  layer: parity
+  tier: brief
+  dimensions: [PA]
+  runtimes: [louhi]
+  collectable_today: false
+  blocker: "IFRT HashValues (ifrt/client.h:371, operations.cc:2185) has no jaxlib Python binding today; requires an upstream jaxlib C++ binding"
+  method: client_timer
+  unit: uint64
+  priority: P2
+  effort: L
+  home: "other:JAX / IFRT upstream Python binding request"
+
+- id: PA-04
+  name: "Run-to-run and intra-host determinism within a runtime (global_checksum_match, intra_host_checksum_match over timed runs)"
+  layer: parity
+  tier: brief
+  dimensions: [PA]
+  runtimes: [mcjax, louhi]
+  collectable_today: probe
+  blocker: "shares PA-01 probe of GemmChainedBenchmark on the IFRT proxy backend"
+  method: client_timer
+  unit: bool
+  priority: P1
+  effort: S
+  home: tpums_nightly
+
+- id: PA-05
+  name: "Effective XLA/libtpu flag parity: flags the worker actually received vs the client's LIBTPU_INIT_ARGS"
+  layer: parity
+  tier: brief
+  dimensions: [PA, D12]
+  runtimes: [mcjax, louhi]
+  collectable_today: true
+  blocker: null
+  method: server_log
+  unit: pct
+  priority: P1
+  effort: S
+  home: tpums_nightly

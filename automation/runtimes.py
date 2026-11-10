@@ -64,9 +64,31 @@ class Runtime:
     if not self.is_pathways:
       return {}
     return {
-        "server": f"{self.pathways_server_image}:{self.pathways_version}",
-        "proxy": f"{self.pathways_proxy_image}:{self.pathways_version}",
+        "server": _format_image_ref(
+            self.pathways_server_image or "", self.pathways_version
+        ),
+        "proxy": _format_image_ref(
+            self.pathways_proxy_image or "", self.pathways_version
+        ),
     }
+
+
+def _format_image_ref(image: str, version: str) -> str:
+  """Appends `:version` only if `image` does not already carry a tag or `@sha256:` digest."""
+  if "@" in image:
+    return image
+  last_slash = image.rfind("/")
+  if ":" in image[last_slash + 1 :]:
+    return image
+  return f"{image}:{version}"
+
+
+def _strip_tag_or_digest(image_ref: str) -> str:
+  base = image_ref.split("@", 1)[0]
+  last_slash = base.rfind("/")
+  if ":" in base[last_slash + 1 :]:
+    return base.rsplit(":", 1)[0]
+  return base
 
 
 MCJAX = Runtime(name="mcjax")
@@ -153,15 +175,22 @@ def resolve_image_provenance(image_ref: str) -> dict[str, Any]:
     None and `tags` empty if the lookup fails, which is logged but not fatal
     so a registry hiccup does not fail the night.
   """
-  provenance: dict[str, Any] = {"image": image_ref, "digest": None, "tags": []}
+  pinned_digest = (
+      image_ref.split("@", 1)[1] if "@sha256:" in image_ref else None
+  )
+  provenance: dict[str, Any] = {
+      "image": image_ref,
+      "digest": pinned_digest,
+      "tags": [],
+  }
   try:
     described = _gcloud_json(
         ["artifacts", "docker", "images", "describe", image_ref]
     )
-    digest = (described.get("image_summary") or {}).get("digest")
+    digest = (described.get("image_summary") or {}).get("digest") or pinned_digest
     provenance["digest"] = digest
     if digest:
-      repo_image = image_ref.rsplit(":", 1)[0]
+      repo_image = _strip_tag_or_digest(image_ref)
       listed = _gcloud_json([
           "artifacts",
           "docker",

@@ -46,6 +46,10 @@ git rev-parse HEAD > /tmp/results/git_commit.txt
 tpums benchmark run-config "$TPUMS_CONFIG" --output_dir=/tmp/results \\
     --xprof_dir="$GCS_XPROF_DIR" 2>&1 | tee /tmp/results/execution.log
 rc=$?
+curl -sf --max-time 4 http://localhost:9090/metrics > /tmp/results/prom_head_9090.txt 2>/dev/null || true
+curl -sf --max-time 4 http://localhost:9091/metrics > /tmp/results/prom_head_9091.txt 2>/dev/null || true
+WORKER0_HOST="${HOSTNAME%-pathways-head*}-pathways-worker-0-0.${HOSTNAME%-pathways-head*}"
+curl -sf --max-time 4 "http://${WORKER0_HOST}:9090/metrics" > /tmp/results/prom_worker0_9090.txt 2>/dev/null || true
 gcloud storage cp /tmp/results/* "$GCS_RESULTS_DIR/"
 exit $rc
 """

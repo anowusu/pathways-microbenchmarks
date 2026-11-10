@@ -1,0 +1,53 @@
+benchmark:
+  name: pathways_overheads
+  xprof_timing: false
+  params:
+    dtype: bfloat16
+    warmup_tries: 2
+    num_runs: 5
+    matrix_dim: 1024
+    seed: 42
+  cases:
+    # CP-08 / RM-01: Client bring-up & time-to-first jax.devices()
+    - mode: client_init
+      warmup_tries: 0
+      num_runs: 1
+    # WK-07 / CP-04 / CP-09: Cold vs. warm XLA compile latency
+    - mode: compile_cold
+      warmup_tries: 0
+      num_runs: 3
+    - mode: compile_warm
+      warmup_tries: 1
+      num_runs: 3
+    # CP-03: Async dispatch latency (depth=1) & pipelined throughput (depth=8, 32)
+    - mode: dispatch_pipelining
+      pipeline_depth: 1
+    - mode: dispatch_pipelining
+      pipeline_depth: 8
+    - mode: dispatch_pipelining
+      pipeline_depth: 32
+    # DP-01 / CP-04 / DP-06: Sharded vs. replicated H2D transfer (jax.device_put)
+    - mode: h2d_sharded
+      data_size_mib: 1
+    - mode: h2d_sharded
+      data_size_mib: 16
+    - mode: h2d_sharded
+      data_size_mib: 128
+    - mode: h2d_replicated
+      data_size_mib: 16
+    # DP-01 / CP-10: Sharded D2H transfer (jax.device_get / np.asarray)
+    - mode: d2h_sharded
+      data_size_mib: 1
+    - mode: d2h_sharded
+      data_size_mib: 16
+    - mode: d2h_sharded
+      data_size_mib: 128
+    # WK-10 / PA-01 / PA-02 / PA-04 / PV-01: Static memory_analysis, runtime memory_stats, and bit-exact/SHA256 parity
+    - mode: memory_and_parity
+      warmup_tries: 1
+      num_runs: 5
+    # ST-01: Checkpoint save & restore probe
+    - mode: orbax_ckpt_probe
+      data_size_mib: 16
+      warmup_tries: 0
+      num_runs: 2

@@ -4,6 +4,7 @@ import dataclasses
 import gc
 import json
 import os
+import time
 import traceback
 from typing import Any, List, Optional
 
@@ -122,16 +123,26 @@ def set_xla_flags(
   )
 
 
+INIT_TIMINGS_MS: dict[str, float] = {}
+
+
 def init_jax_distributed():
   """Ensures JAX distributed coordinator is initialized."""
   print("Initializing JAX distributed system...")
+  t0 = time.perf_counter()
   try:
     jax.distributed.initialize()
   except Exception as e:
     print(f"Note: jax.distributed.initialize() failed or not needed: {e}")
+  t1 = time.perf_counter()
   try:
     devices = jax.devices()
+    t2 = time.perf_counter()
+    INIT_TIMINGS_MS["distributed_init_ms"] = (t1 - t0) * 1000.0
+    INIT_TIMINGS_MS["first_jax_devices_ms"] = (t2 - t1) * 1000.0
+    INIT_TIMINGS_MS["client_bringup_total_ms"] = (t2 - t0) * 1000.0
     print(f"JAX devices: {len(devices)} (e.g. {devices[:4]}...)")
+    print(f"CLIENT_BRINGUP_TIMINGS_JSON: {json.dumps(INIT_TIMINGS_MS, sort_keys=True)}")
   except Exception as e:
     print(f"Error initializing JAX devices: {e}")
 

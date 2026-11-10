@@ -1,0 +1,27 @@
+# Daily Pathways benchmarking suite for TPU v5e 4x8 (1 slice: 8 hosts, 32 chips).
+#
+# Runs ONLY on `mcjax` and `louhi` (Rapid is excluded per R5 / Decision 4).
+# Includes the 5 canonical device-time & collective configs (for 20% plausibility
+# comparison against tpums-nightly) plus the client-timer / overheads / parity
+# microbenchmark config (`configs/v5e/4x8/pathways_overheads.yaml`).
+
+suite_name: daily_pathways_metrics_v5e
+description: Daily McJAX vs Pathways (Louhi) comprehensive metrics suite on TPU v5e 4x8
+
+runtimes:
+  - mcjax
+  - louhi
+
+configs:
+  # 4x8 ICI collectives (8 hosts, 32 chips)
+  - configs/v5e/4x8/all_gather.yaml
+  - configs/v5e/4x8/all_reduce.yaml
+  - configs/v5e/4x8/all_to_all.yaml
+
+  # Per-chip compute and HBM memory bandwidth on the same 4x8 slice
+  - configs/v5e/4x8/gemm.yaml
+  - configs/v5e/4x8/hbm.yaml
+
+  # Client-timer, compilation, dispatch pipelining, H2D/D2H, memory_stats, and
+  # numerical parity benchmark config
+  - configs/v5e/4x8/pathways_overheads.yaml

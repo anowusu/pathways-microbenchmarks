@@ -35,6 +35,8 @@ from automation import runtimes as runtimes_lib
 
 RUN_SOURCE = "tpums-nightly"
 RUN_TYPE = "nightly"
+DAILY_RUN_SOURCE = "tpums-pathways-metrics-daily"
+DAILY_RUN_TYPE = "daily"
 WORKLOAD_TYPE = "microbenchmarks"
 
 # BigQuery schema: (name, type). Names follow uBench's MicrobenchmarkSchema.
@@ -89,7 +91,15 @@ _BANDWIDTH_KEYS = (
     "wall_clock_bandwidth_per_chip_gb_s",
     "wall_clock_bandwidth_per_device_gb_s",
 )
-_METRIC_PREFIXES = ("xprof_", "wall_clock_")
+_METRIC_PREFIXES = (
+    "xprof_",
+    "wall_clock_",
+    "compile_",
+    "dispatch_",
+    "transfer_",
+    "sidecar_",
+    "proxy_",
+)
 _METRIC_KEYS = frozenset({
     "actual_runs",
     "total_duration_s",
@@ -97,6 +107,30 @@ _METRIC_KEYS = frozenset({
     "shard_size_mib",
     "data_size_mib",
     "total_flops",
+    "proxy_hop_ms",
+    "distributed_init_ms",
+    "first_jax_devices_ms",
+    "client_bringup_total_ms",
+    "jax_backend_compile_last_ms",
+    "compile_only_ms",
+    "dispatch_issue_only_ms",
+    "compiled_temp_bytes",
+    "compiled_arg_bytes",
+    "compiled_output_bytes",
+    "compiled_code_bytes",
+    "runtime_peak_hbm_bytes",
+    "runtime_bytes_in_use",
+    "memory_stats_error",
+    "parity_gemm_sha256",
+    "parity_allreduce_sha256",
+    "parity_checksum_hex",
+    "run_to_run_deterministic",
+    "backend_platform_version",
+    "orbax_save_blocking_ms",
+    "orbax_save_total_ms",
+    "orbax_restore_ms",
+    "orbax_save_gb_s",
+    "orbax_restore_gb_s",
 })
 # summary.csv columns that describe the platform rather than the benchmark.
 _PLATFORM_KEYS = (
@@ -110,6 +144,7 @@ _PLATFORM_KEYS = (
     "jax_version",
     "jaxlib_version",
     "libtpu_version",
+    "pathwaysutils_version",
     "xla_flags",
     "libtpu_init_args",
 )
@@ -145,8 +180,12 @@ def _is_metric(key: str) -> bool:
 
 
 def benchmark_type_of(category: str) -> str:
-  """Maps an aggregator category to uBench's `collective` / `compute`."""
-  return "collective" if category == "collectives" else "compute"
+  """Maps an aggregator category to uBench's benchmark_type."""
+  if category == "collectives":
+    return "collective"
+  if category in ("gemm", "hbm", "compute"):
+    return "compute"
+  return category
 
 
 # Row columns that identify the build or placement, not the benchmark case.
@@ -202,6 +241,10 @@ def row_to_record(
     region: str,
     cluster: str,
     user: str,
+    run_source: str = RUN_SOURCE,
+    run_type: str = RUN_TYPE,
+    run_group: Optional[str] = None,
+    workload_type: str = WORKLOAD_TYPE,
 ) -> dict[str, Any]:
   """Converts one aggregated summary.csv row into a BigQuery record.
 
@@ -221,6 +264,10 @@ def row_to_record(
   """
   runtime = str(row.get("runtime") or runtimes_lib.MCJAX.name)
   metrics = {k: v for k, v in row.items() if _is_metric(k)}
+  wall_p50 = _number(row.get("wall_clock_p50_ms"))
+  xprof_p50 = _number(row.get("xprof_p50_ms"))
+  if wall_p50 is not None and xprof_p50 is not None:
+    metrics["proxy_hop_ms"] = f"{wall_p50 - xprof_p50:.6f}"
   params = {
       k: v
       for k, v in row.items()
@@ -270,9 +317,9 @@ def row_to_record(
       "result_error": None,
       "metrics_other": json.dumps(metrics, sort_keys=True),
       "params_other": json.dumps(params, sort_keys=True, default=str),
-      "run_type": RUN_TYPE,
-      "run_source": RUN_SOURCE,
-      "run_group": run_name,
+      "run_type": run_type,
+      "run_source": run_source,
+      "run_group": run_group or run_name,
       "run_mode": "cloud",
       "recipe_type": "perf",
       "is_run_externally_visible": False,
@@ -293,7 +340,7 @@ def row_to_record(
       "configs_container_image": container_image,
       "configs_xla_flags": row.get("libtpu_init_args") or None,
       "logs_artifact_directory": artifacts_dir,
-      "workload_type": WORKLOAD_TYPE,
+      "workload_type": workload_type,
       "cloud_region": region,
       "cluster_name": cluster,
   }
@@ -310,6 +357,10 @@ def build_records(
     region: str,
     cluster: str,
     user: Optional[str] = None,
+    run_source: str = RUN_SOURCE,
+    run_type: str = RUN_TYPE,
+    run_name: Optional[str] = None,
+    run_group: Optional[str] = None,
 ) -> list[dict[str, Any]]:
   """Builds the BigQuery records of one night.
 
@@ -326,7 +377,8 @@ def build_records(
     user: Reporter identity (default: the OS user).
   """
   user = user or getpass.getuser()
-  run_name = f"{RUN_SOURCE}-{date_str}"
+  run_group = run_group or f"{run_source}-{date_str}"
+  run_name = run_name or run_group
   records = []
   for category, rows in categorized_metrics.items():
     for row in rows:
@@ -349,8 +401,169 @@ def build_records(
               region=region,
               cluster=cluster,
               user=user,
+              run_source=run_source,
+              run_type=run_type,
+              run_group=run_group,
           )
       )
+  return records
+
+
+def build_metric_records(
+    manifest: Sequence[Mapping[str, Any]],
+    measurements: Mapping[tuple[str, str], Mapping[str, Any]],
+    *,
+    date_str: str,
+    started_at: datetime.datetime,
+    accelerator: str = "v5e",
+    topology: str = "4x8",
+    total_devices: int = 32,
+    container_image: str,
+    default_artifacts_dir: str,
+    region: str,
+    cluster: str,
+    run_source: str = DAILY_RUN_SOURCE,
+    run_type: str = DAILY_RUN_TYPE,
+    run_name: Optional[str] = None,
+    run_group: Optional[str] = None,
+    software_versions: Optional[Sequence[Mapping[str, str]]] = None,
+    runtime_provenance_by_rt: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    user: Optional[str] = None,
+) -> list[dict[str, Any]]:
+  """Builds one 34-column BigQuery record per (manifest entry, runtime)."""
+  user = user or getpass.getuser()
+  run_stamp = started_at.strftime("%Y%m%dT%H%M%SZ")
+  run_group = run_group or f"{run_source}-{date_str}"
+  run_name = run_name or f"{run_source}-{run_stamp}"
+  now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+  chips_per_node = 4 if accelerator in ("v5e", "v6e", "tpu7x") else None
+  num_nodes = (
+      max(1, total_devices // chips_per_node)
+      if total_devices and chips_per_node
+      else None
+  )
+  versions_json = json.dumps(list(software_versions or []))
+  records: list[dict[str, Any]] = []
+
+  for entry in manifest:
+    metric_id = str(entry["id"])
+    layer = str(entry.get("layer", "unknown"))
+    unit = str(entry.get("unit", ""))
+    runtimes = list(entry.get("runtimes") or ["louhi"])
+    for runtime in runtimes:
+      if runtime == "rapid":
+        continue
+      meas = measurements.get((metric_id, runtime))
+      rt_prov = (runtime_provenance_by_rt or {}).get(runtime, {})
+      is_measured = bool(
+          meas
+          and meas.get("status") == "measured"
+          and (
+              _number(meas.get("value_p50")) is not None
+              or _number(meas.get("value_mean")) is not None
+              or meas.get("value_text") not in (None, "")
+          )
+      )
+      blocker = (
+          None
+          if is_measured
+          else str(
+              (meas or {}).get("blocker")
+              or entry.get("blocker")
+              or "uncollected in this run"
+          )
+      )
+      val_p50 = _number((meas or {}).get("value_p50"))
+      val_p90 = _number((meas or {}).get("value_p90"))
+      val_mean = _number((meas or {}).get("value_mean"))
+      collected_at = str((meas or {}).get("collected_at") or now_iso)
+      artifact_uri = str(
+          (meas or {}).get("artifact_uri") or default_artifacts_dir
+      )
+
+      if is_measured:
+        metrics_payload: dict[str, Any] = {
+            "status": "measured",
+            "metric_id": metric_id,
+            "p50": val_p50,
+            "p90": val_p90,
+            "mean": val_mean,
+            "unit": unit,
+        }
+        if meas and meas.get("value_text") is not None:
+          metrics_payload["value_text"] = str(meas["value_text"])
+        if meas and isinstance(meas.get("extra_metrics"), Mapping):
+          metrics_payload.update(meas["extra_metrics"])
+        result_success = True
+        result_error = None
+      else:
+        metrics_payload = {
+            "status": "not_collectable_yet",
+            "blocker": blocker,
+            "metric_id": metric_id,
+            "unit": unit,
+        }
+        result_success = False
+        result_error = f"not collectable yet: {blocker}"
+
+      params_payload: dict[str, Any] = {
+          "metric_id": metric_id,
+          "metric_name": str(entry.get("name", "")),
+          "layer": layer,
+          "tier": str(entry.get("tier", "full")),
+          "dimensions": list(entry.get("dimensions") or []),
+          "method": str(entry.get("method", "")),
+          "unit": unit,
+          "priority": str(entry.get("priority", "")),
+          "effort": str(entry.get("effort", "")),
+          "home": str(entry.get("home", "")),
+          "collectable_today": bool(is_measured),
+          "blocker": blocker,
+          "runtime": runtime,
+      }
+      if rt_prov:
+        params_payload.update(rt_prov)
+
+      records.append({
+          "run_id": f"{run_name}_{runtime}_{metric_id}",
+          "run_name": run_name,
+          "benchmark_type": layer,
+          "benchmark_name": metric_id,
+          "start_time": started_at.isoformat(),
+          "end_time": collected_at,
+          "result_success": result_success,
+          "result_error": result_error,
+          "metrics_other": json.dumps(metrics_payload, sort_keys=True, default=str),
+          "params_other": json.dumps(params_payload, sort_keys=True, default=str),
+          "run_type": run_type,
+          "run_source": run_source,
+          "run_group": run_group,
+          "run_mode": "cloud",
+          "recipe_type": "manifest_metric",
+          "is_run_externally_visible": False,
+          "params_num_runs": _int((meas or {}).get("num_runs")),
+          "params_dtype": (meas or {}).get("dtype"),
+          "metrics_time_per_iter_ms_p50": val_p50 if unit == "ms" else None,
+          "metrics_tflops_achieved_p50": (
+              val_p50 if unit in ("TFLOP/s", "tflops") else None
+          ),
+          "metrics_achieved_bandwidth_gbps_p50": (
+              val_p50 if unit in ("GB/s", "gbps") else None
+          ),
+          "update_person_ldap": user,
+          "update_timestamp": now_iso,
+          "hardware_id": _HARDWARE_IDS.get(accelerator, accelerator),
+          "hardware_num_chips": total_devices,
+          "hardware_num_nodes": num_nodes,
+          "hardware_topology": topology,
+          "configs_software_versions": versions_json,
+          "configs_container_image": container_image,
+          "configs_xla_flags": (meas or {}).get("xla_flags"),
+          "logs_artifact_directory": artifact_uri,
+          "workload_type": WORKLOAD_TYPE,
+          "cloud_region": region,
+          "cluster_name": cluster,
+      })
   return records
 
 

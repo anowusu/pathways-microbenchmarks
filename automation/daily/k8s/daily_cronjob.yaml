@@ -83,14 +83,18 @@ spec:
               imagePullPolicy: Always
               command: ["python", "-m", "automation.daily.daily_runner"]
               env:
-                # Decision 3: Patching disabled. Consume the nightly's already-published
-                # patched Louhi server image pinned by sha256 digest.
+                # Decision 3 + OTLP (b/573605374, cl/1018902971..cl/1019381440):
+                # Consume the digest-pinned OSS server and proxy_server images built
+                # from cl/1019381440 (which include both cl/1012570033 PJRT profiler
+                # registration and the 91-metric OTLP push exporter).
                 - name: TPUMS_LOUHI_SERVER_IMAGE
-                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server@sha256:ed429f71766fa2b35fe1cad39669d4ac547f851c09727f45a4516a8e9bf5e8f6"
+                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server@sha256:368203e820cdb8009cc449ba1ad8f44a25763cec133d4a0bc8b8f3bfa0d2b47b"
                 - name: TPUMS_LOUHI_PROXY_IMAGE
-                  value: "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server"
+                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/proxy_server@sha256:5270798ba7bb11c975064f92c8d545444a71fe232cdc4cdf4e4e518a900da83b"
                 - name: TPUMS_LOUHI_VERSION
-                  value: "jax-0.12.0.1"
+                  value: "cl-1019381440"
+                - name: TPUMS_ENABLE_OTLP_METRICS
+                  value: "1"
                 # Decision 5: Distinct `tpmd-` JobSet name prefix and `app` label.
                 - name: TPUMS_WORKLOAD_PREFIX
                   value: "tpmd"

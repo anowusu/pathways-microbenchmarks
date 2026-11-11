@@ -451,6 +451,37 @@ PATHWAYS_EXPORTER_DEBUG_ARG = (
     "temporary_flag_for_debugging_enable_metric_delta_log_exporter=true;;;"
     "temporary_flag_for_debugging_metric_delta_log_exporter_interval=5s"
 )
+PATHWAYS_OTLP_ARGS = (
+    "--enable_pathways_metrics",
+    "--additional_metrics_regex=.*",
+)
+
+
+def _runtime_supports_otlp_flags(runtime: runtimes_lib.Runtime) -> bool:
+  """Returns True when `runtime` uses a Pathways build supporting `--enable_pathways_metrics`."""
+  if os.environ.get("TPUMS_ENABLE_OTLP_METRICS", "").strip().lower() in (
+      "1",
+      "true",
+      "yes",
+  ):
+    return True
+  combined = " ".join([
+      str(runtime.pathways_version or ""),
+      str(runtime.pathways_server_image or ""),
+      str(runtime.pathways_proxy_image or ""),
+  ]).lower()
+  return any(
+      tok in combined
+      for tok in (
+          "1019381440",
+          "1019355958",
+          "1018902971",
+          "1018902972",
+          "1015142496",
+          "6396a49f",
+          "otlp",
+      )
+  )
 
 
 def sanitize_workload_name(
@@ -493,16 +524,18 @@ def inject_workload_labels(
     manifest_yaml: str,
     labels: Optional[dict[str, str]] = None,
     extra_pathways_args: Optional[list[str]] = None,
+    inject_otlp_env: bool = True,
 ) -> str:
-  """Stamps `labels` onto JobSet, Job, and Pod metadata and optionally appends Pathways container args."""
+  """Stamps `labels` onto JobSet, Job, and Pod metadata and optionally appends Pathways container args/OTLP env."""
   eff_labels = dict(labels or {})
   if DEFAULT_APP_LABEL and "app" not in eff_labels:
     eff_labels["app"] = DEFAULT_APP_LABEL
-  if not eff_labels and not extra_pathways_args:
+  if not eff_labels and not extra_pathways_args and not inject_otlp_env:
     return manifest_yaml
   doc = yaml.safe_load(manifest_yaml)
   if not isinstance(doc, dict):
     return manifest_yaml
+  workload_name = str((doc.get("metadata") or {}).get("name") or "")
   if eff_labels:
     doc.setdefault("metadata", {}).setdefault("labels", {}).update(eff_labels)
   for rjob in doc.get("spec", {}).get("replicatedJobs", []) or []:
@@ -512,15 +545,34 @@ def inject_workload_labels(
     pod_tmpl = job_tmpl.setdefault("spec", {}).setdefault("template", {})
     if eff_labels:
       pod_tmpl.setdefault("metadata", {}).setdefault("labels", {}).update(eff_labels)
-    if extra_pathways_args:
+    if extra_pathways_args or inject_otlp_env:
       pod_spec = pod_tmpl.get("spec", {}) or {}
       for c in (pod_spec.get("initContainers") or []) + (pod_spec.get("containers") or []):
-        if c.get("name") in ("pathways-rm", "pathways-proxy", "pathways-worker"):
-          c_args = list(c.get("args") or [])
-          for arg in extra_pathways_args:
-            if arg not in c_args:
-              c_args.append(arg)
-          c["args"] = c_args
+        cname = str(c.get("name") or "")
+        if cname in ("pathways-rm", "pathways-proxy", "pathways-worker"):
+          if extra_pathways_args:
+            c_args = list(c.get("args") or [])
+            for arg in extra_pathways_args:
+              if arg not in c_args:
+                c_args.append(arg)
+            c["args"] = c_args
+          if inject_otlp_env and workload_name:
+            c_env = list(c.get("env") or [])
+            existing_names = {str(e.get("name")) for e in c_env if isinstance(e, dict)}
+            endpoint = (
+                f"http://{workload_name}-pathways-head-0-0.{workload_name}:4317"
+                if cname == "pathways-worker"
+                else "http://127.0.0.1:4317"
+            )
+            svc_name = cname.replace("-", "_")
+            for k, v in (
+                ("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint),
+                ("OTEL_METRIC_EXPORT_INTERVAL", "2000"),
+                ("OTEL_SERVICE_NAME", svc_name),
+            ):
+              if k not in existing_names:
+                c_env.append({"name": k, "value": v})
+            c["env"] = c_env
   return yaml.safe_dump(doc, sort_keys=False)
 
 
@@ -606,12 +658,14 @@ def generate_pathways_manifest(
       pod_priority_class=pod_priority_class,
   )
   raw_yaml = yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
-  extra_pw_args = (
-      [PATHWAYS_EXPORTER_DEBUG_ARG]
-      if "pathways_overheads" in str(config_rel_path)
-      else None
+  extra_pw_args: list[str] = []
+  if "pathways_overheads" in str(config_rel_path):
+    extra_pw_args.append(PATHWAYS_EXPORTER_DEBUG_ARG)
+  if _runtime_supports_otlp_flags(runtime):
+    extra_pw_args.extend(PATHWAYS_OTLP_ARGS)
+  return inject_workload_labels(
+      raw_yaml, extra_pathways_args=extra_pw_args or None
   )
-  return inject_workload_labels(raw_yaml, extra_pathways_args=extra_pw_args)
 
 
 def generate_jobset_manifest(

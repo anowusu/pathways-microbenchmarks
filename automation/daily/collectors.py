@@ -645,6 +645,9 @@ def collect_all_manifest_metrics(
   k8s_by_rt: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
   logs_by_rt: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
   prom_by_rt: dict[str, dict[str, float]] = collections.defaultdict(dict)
+  otlp_attrs_by_rt: dict[str, dict[str, list[dict[str, Any]]]] = (
+      collections.defaultdict(dict)
+  )
   cache_mib_by_rt: dict[str, list[float]] = collections.defaultdict(list)
   cache_cnt_by_rt: dict[str, int] = collections.defaultdict(int)
   xprof_mib_by_rt: dict[str, list[float]] = collections.defaultdict(list)
@@ -687,6 +690,18 @@ def collect_all_manifest_metrics(
           )
           if ptext:
             prom_by_rt[r.runtime].update(parse_prometheus_text(ptext))
+        otlp_payload = fetch_gcs_json(
+            utils.format_gcs_uri(r.gcs_artifact_path, "otlp_metrics.json")
+        )
+        if isinstance(otlp_payload.get("flat_metrics"), dict):
+          for mk, mv in otlp_payload["flat_metrics"].items():
+            num_v = _num(mv)
+            if num_v is not None:
+              prom_by_rt[r.runtime][mk] = num_v
+        if isinstance(otlp_payload.get("metric_attributes"), dict):
+          for mk, attrs_list in otlp_payload["metric_attributes"].items():
+            if isinstance(attrs_list, list) and attrs_list:
+              otlp_attrs_by_rt[r.runtime].setdefault(mk, []).extend(attrs_list)
 
       sub = "xprof" if r.runtime != "mcjax" else "tensorboard"
       x_mib, x_cnt = _gcs_dir_size_mib(
@@ -971,6 +986,31 @@ def collect_all_manifest_metrics(
           "pct", st12["p50"], st12["p90"], st12["mean"], artifact_uri=_art_uri(rt, "gemm")
       )
 
+    # CP-13: Client live XLA executables, in-flight gauge, and RM command wire bytes (Louhi OTLP)
+    if rt == "louhi":
+      live_execs = prom_data.get("pathways_client_live_xla_executables")
+      inflight_execs = prom_data.get(
+          "pathways_client_executable_inflight_executions"
+      )
+      rm_req_b = prom_data.get(
+          "pathways_client_resource_manager_command_request_size_bytes_mean"
+      ) or prom_data.get(
+          "pathways_client_resource_manager_command_request_size_bytes_p50"
+      )
+      if live_execs is not None or inflight_execs is not None or rm_req_b is not None:
+        v13 = float(live_execs if live_execs is not None else (inflight_execs or 0.0))
+        measurements[("CP-13", rt)] = _meas(
+            "count",
+            v13,
+            v13,
+            v13,
+            value_text=(
+                f"live_xla_executables={live_execs}, "
+                f"inflight={inflight_execs}, rm_req_mean_bytes={rm_req_b}"
+            ),
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
+        )
+
     # RM-01: Cluster-ready time: RM worker registration + client bring-up (unit: s)
     if rt == "louhi":
       reg_s_vals = [
@@ -1005,13 +1045,30 @@ def collect_all_manifest_metrics(
 
     if rt == "louhi":
       # RM-02: Scheduler placement latency & proxy-to-RM command latency
+      otlp_rm_p50_s = prom_data.get(
+          "pathways_client_resource_manager_command_latency_seconds_p50"
+      )
+      otlp_rm_p90_s = prom_data.get(
+          "pathways_client_resource_manager_command_latency_seconds_p90"
+      )
+      otlp_rm_mean_s = prom_data.get(
+          "pathways_client_resource_manager_command_latency_seconds_mean"
+      )
       rm_cmd_sum = prom_data.get(
           "learning:pathways:client:resource_manager_command_latency_sum"
       )
       rm_cmd_cnt = prom_data.get(
           "learning:pathways:client:resource_manager_command_latency_count"
       )
-      if rm_cmd_sum is not None and rm_cmd_cnt and rm_cmd_cnt > 0:
+      if otlp_rm_p50_s is not None:
+        measurements[("RM-02", rt)] = _meas(
+            "ms",
+            otlp_rm_p50_s * 1000.0,
+            (otlp_rm_p90_s or otlp_rm_p50_s) * 1000.0,
+            (otlp_rm_mean_s or otlp_rm_p50_s) * 1000.0,
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
+        )
+      elif rm_cmd_sum is not None and rm_cmd_cnt and rm_cmd_cnt > 0:
         val_ms = max(0.0, rm_cmd_sum / rm_cmd_cnt)
         measurements[("RM-02", rt)] = _meas(
             "ms", val_ms, val_ms, val_ms, artifact_uri=_art_uri(rt, "pathways_overheads")
@@ -1034,7 +1091,16 @@ def collect_all_manifest_metrics(
             extra_metrics={
                 "worker_enqueue_work_ms": xp_data.get(
                     "rm03_worker_enqueue_work_ms"
-                )
+                ),
+                "otlp_scheduler_dispatch_p50_us": prom_data.get(
+                    "pathways_scheduler_client_dispatch_latency_microseconds_p50"
+                ),
+                "otlp_worker_rpc_queue_p50_us": prom_data.get(
+                    "pathways_worker_rpc_queue_latency_microseconds_p50"
+                ),
+                "otlp_worker_rpc_process_p50_us": prom_data.get(
+                    "pathways_worker_rpc_process_latency_microseconds_p50"
+                ),
             },
         )
 
@@ -1055,22 +1121,46 @@ def collect_all_manifest_metrics(
           artifact_uri=_art_uri(rt, "gemm"),
       )
 
-      # RM-06: Transport pipe health (Prometheus probe)
+      # RM-06: Transport pipe health (OTLP / Prometheus probe)
+      otlp_pipe_ms_p50 = prom_data.get(
+          "pathways_pipe_message_latency_milliseconds_p50"
+      ) or prom_data.get("pathways_pipe_tick_latency_milliseconds_p50")
+      otlp_pipe_ms_p90 = prom_data.get(
+          "pathways_pipe_message_latency_milliseconds_p90"
+      ) or prom_data.get("pathways_pipe_tick_latency_milliseconds_p90")
+      otlp_pipe_ms_mean = prom_data.get(
+          "pathways_pipe_message_latency_milliseconds_mean"
+      ) or prom_data.get("pathways_pipe_tick_latency_milliseconds_mean")
       pipe_sum = prom_data.get("learning:pathways:pipe:tick_latencies_sum")
       pipe_cnt = prom_data.get("learning:pathways:pipe:tick_latencies_count")
-      if pipe_sum is not None and pipe_cnt and pipe_cnt > 0:
+      if otlp_pipe_ms_p50 is not None:
+        measurements[("RM-06", rt)] = _meas(
+            "us",
+            otlp_pipe_ms_p50 * 1000.0,
+            (otlp_pipe_ms_p90 or otlp_pipe_ms_p50) * 1000.0,
+            (otlp_pipe_ms_mean or otlp_pipe_ms_p50) * 1000.0,
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
+        )
+      elif pipe_sum is not None and pipe_cnt and pipe_cnt > 0:
         val_us = max(0.0, pipe_sum / pipe_cnt)
         measurements[("RM-06", rt)] = _meas(
             "us", val_us, val_us, val_us, artifact_uri=_art_uri(rt, "pathways_overheads")
         )
 
-      # RM-07: RM chip-second utilisation (Prometheus/log exporter probe)
-      avail_cs = prom_data.get(
-          "learning:pathways:resource_manager:available_chip_sec"
-      ) or _num(
-          (merged_logs.get("delta_metrics") or {}).get(
-              "/learning/pathways/resource_manager/available_chip_sec"
+      # RM-07: RM chip-second utilisation (OTLP / Prometheus / log exporter probe)
+      avail_cs = (
+          prom_data.get("pathways_resource_manager_available_chip_seconds_total")
+          or prom_data.get(
+              "learning:pathways:resource_manager:available_chip_sec"
           )
+          or _num(
+              (merged_logs.get("delta_metrics") or {}).get(
+                  "/learning/pathways/resource_manager/available_chip_sec"
+              )
+          )
+      )
+      used_cs = prom_data.get(
+          "pathways_resource_manager_used_chip_seconds_total"
       )
       if avail_cs is not None and avail_cs >= 0:
         measurements[("RM-07", rt)] = _meas(
@@ -1078,6 +1168,11 @@ def collect_all_manifest_metrics(
             float(avail_cs),
             float(avail_cs),
             float(avail_cs),
+            value_text=(
+                f"available_chip_s={avail_cs}, used_chip_s={used_cs}"
+                if used_cs is not None
+                else None
+            ),
             artifact_uri=_art_uri(rt, "pathways_overheads"),
         )
 
@@ -1086,13 +1181,24 @@ def collect_all_manifest_metrics(
       comp_mode = delta_m.get(
           "/learning/pathways/resource_manager/compilation_mode"
       )
-      if comp_mode:
+      if not comp_mode:
+        cm_attrs = otlp_attrs_by_rt.get(rt, {}).get(
+            "pathways_resource_manager_compilation_mode_total", []
+        )
+        if cm_attrs:
+          comp_mode = str(
+              cm_attrs[0].get("mode")
+              or cm_attrs[0].get("compilation_mode")
+              or cm_attrs[0]
+          )
+      clients_cnt = prom_data.get("pathways_clients")
+      if comp_mode or clients_cnt is not None:
         measurements[("RM-08", rt)] = _meas(
             "string",
-            1.0,
-            1.0,
-            1.0,
-            value_text=str(comp_mode),
+            float(clients_cnt if clients_cnt is not None else 1.0),
+            float(clients_cnt if clients_cnt is not None else 1.0),
+            float(clients_cnt if clients_cnt is not None else 1.0),
+            value_text=f"compilation_mode={comp_mode or 'default'}, clients={clients_cnt}",
             artifact_uri=_art_uri(rt, "pathways_overheads"),
         )
 
@@ -1113,6 +1219,36 @@ def collect_all_manifest_metrics(
       measurements[("RM-11", rt)] = _meas(
           "s", hb_s, hb_s, hb_s, artifact_uri=_art_uri(rt, "gemm")
       )
+
+      # RM-14: Worker initial idleness, dependency fan-out, and proto decompression latency (OTLP)
+      init_idle_p50 = prom_data.get(
+          "pathways_worker_initial_idleness_milliseconds_p50"
+      )
+      init_idle_p90 = prom_data.get(
+          "pathways_worker_initial_idleness_milliseconds_p90"
+      )
+      init_idle_mean = prom_data.get(
+          "pathways_worker_initial_idleness_milliseconds_mean"
+      )
+      deps_mean = prom_data.get("pathways_worker_dependencies_added_per_item_mean")
+      decomp_p50 = prom_data.get(
+          "pathways_worker_component_proto_decompression_latency_milliseconds_p50"
+      )
+      if init_idle_p50 is not None or decomp_p50 is not None:
+        v_p50 = float(init_idle_p50 if init_idle_p50 is not None else decomp_p50)
+        v_p90 = float(init_idle_p90 if init_idle_p90 is not None else v_p50)
+        v_mean = float(init_idle_mean if init_idle_mean is not None else v_p50)
+        measurements[("RM-14", rt)] = _meas(
+            "ms",
+            v_p50,
+            v_p90,
+            v_mean,
+            value_text=(
+                f"initial_idleness_p50={init_idle_p50} ms, "
+                f"deps_per_item={deps_mean}, proto_decomp_p50={decomp_p50} ms"
+            ),
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
+        )
 
     # WK-01: TPU device-time parity ratio (Pathways / McJAX)
     ratios: list[float] = []
@@ -1188,6 +1324,21 @@ def collect_all_manifest_metrics(
 
     # WK-08: Proxy persistent-cache hit/miss and lookup latency (Louhi only)
     if rt == "louhi":
+      otlp_lookup_p50 = prom_data.get(
+          "pathways_persistent_compilation_cache_lookup_time_milliseconds_p50"
+      )
+      otlp_lookup_p90 = prom_data.get(
+          "pathways_persistent_compilation_cache_lookup_time_milliseconds_p90"
+      )
+      otlp_lookup_mean = prom_data.get(
+          "pathways_persistent_compilation_cache_lookup_time_milliseconds_mean"
+      )
+      otlp_lookups = prom_data.get(
+          "pathways_persistent_compilation_cache_lookups_total"
+      )
+      otlp_misses = prom_data.get(
+          "pathways_persistent_compilation_cache_misses_total"
+      )
       io_vals = [
           float(lg["wk08_persistent_cache_io_p50_ms"])
           for lg in log_list
@@ -1199,7 +1350,19 @@ def collect_all_manifest_metrics(
           if _num(lg.get("wk08_worker_cache_fetch_p50_ms")) is not None
       ]
       combined_cache_ms = io_vals or fetch_vals
-      if combined_cache_ms:
+      if otlp_lookup_p50 is not None:
+        measurements[("WK-08", rt)] = _meas(
+            "ms",
+            otlp_lookup_p50,
+            otlp_lookup_p90 or otlp_lookup_p50,
+            otlp_lookup_mean or otlp_lookup_p50,
+            value_text=(
+                f"lookups={otlp_lookups}, misses={otlp_misses}, "
+                f"lookup_p50={otlp_lookup_p50} ms"
+            ),
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
+        )
+      elif combined_cache_ms:
         st = _pct_stats(combined_cache_ms)
         hits = sum(int(lg.get("wk08_persistent_cache_hits", 0) or 0) for lg in log_list)
         misses = sum(int(lg.get("wk08_persistent_cache_misses", 0) or 0) for lg in log_list)
@@ -1210,6 +1373,41 @@ def collect_all_manifest_metrics(
             st["mean"],
             value_text=f"hits={hits}, misses={misses}, lookup_p50={st['p50']} ms",
             artifact_uri=_art_uri(rt, "gemm"),
+        )
+
+      # WK-15: Three-tier compilation cache breakdown & compression ratio (OTLP)
+      fp_p50 = prom_data.get(
+          "pathways_compilation_cache_fingerprint_time_milliseconds_p50"
+      )
+      fp_p90 = prom_data.get(
+          "pathways_compilation_cache_fingerprint_time_milliseconds_p90"
+      )
+      fp_mean = prom_data.get(
+          "pathways_compilation_cache_fingerprint_time_milliseconds_mean"
+      )
+      inmem_lookups = prom_data.get(
+          "pathways_compilation_cache_in_memory_cache_lookups_total"
+      )
+      inmem_misses = prom_data.get(
+          "pathways_compilation_cache_in_memory_cache_misses_total"
+      )
+      comp_ratio = prom_data.get(
+          "pathways_persistent_compilation_cache_compression_ratio_mean"
+      ) or prom_data.get(
+          "pathways_persistent_compilation_cache_compression_ratio_p50"
+      )
+      if fp_p50 is not None or inmem_lookups is not None or comp_ratio is not None:
+        v15_p50 = float(fp_p50 if fp_p50 is not None else (comp_ratio or 0.0))
+        measurements[("WK-15", rt)] = _meas(
+            "ms",
+            v15_p50,
+            float(fp_p90 if fp_p90 is not None else v15_p50),
+            float(fp_mean if fp_mean is not None else v15_p50),
+            value_text=(
+                f"fingerprint_p50={fp_p50} ms, inmem_lookups={inmem_lookups}, "
+                f"inmem_misses={inmem_misses}, compression_ratio={comp_ratio}"
+            ),
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
         )
 
     # WK-10: Compiled HBM footprint per executable (static) + runtime peak HBM (unit: MiB)
@@ -1293,17 +1491,78 @@ def collect_all_manifest_metrics(
             artifact_uri=_art_uri(rt, "gemm"),
         )
 
-      # DP-05: Pathways RPC transport bytes and latency (Prometheus probe)
+      # DP-05: Pathways RPC transport bytes and latency (OTLP / Prometheus probe)
+      otlp_rpc_p50 = prom_data.get(
+          "pathways_transport_rpc_send_latency_milliseconds_p50"
+      )
+      otlp_rpc_p90 = prom_data.get(
+          "pathways_transport_rpc_send_latency_milliseconds_p90"
+      )
+      otlp_rpc_mean = prom_data.get(
+          "pathways_transport_rpc_send_latency_milliseconds_mean"
+      )
       rpc_lat_sum = prom_data.get(
           "learning:pathways:transport:rpc:send_latencies_sum"
       )
       rpc_lat_cnt = prom_data.get(
           "learning:pathways:transport:rpc:send_latencies_count"
       )
-      if rpc_lat_sum is not None and rpc_lat_cnt and rpc_lat_cnt > 0:
+      if otlp_rpc_p50 is not None:
+        measurements[("DP-05", rt)] = _meas(
+            "ms",
+            otlp_rpc_p50,
+            otlp_rpc_p90 or otlp_rpc_p50,
+            otlp_rpc_mean or otlp_rpc_p50,
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
+        )
+      elif rpc_lat_sum is not None and rpc_lat_cnt and rpc_lat_cnt > 0:
         val_ms = max(0.0, rpc_lat_sum / rpc_lat_cnt)
         measurements[("DP-05", rt)] = _meas(
             "ms", val_ms, val_ms, val_ms, artifact_uri=_art_uri(rt, "pathways_overheads")
+        )
+
+      # DP-07: Pathways ICI transport volume, buffer errors, and reshard fragmentation (OTLP)
+      ici_sent = prom_data.get("pathways_transport_ici_sent_bytes_total")
+      ici_recv = prom_data.get("pathways_transport_ici_received_bytes_total")
+      ici_errs = prom_data.get(
+          "pathways_transport_ici_send_buffer_errors_total"
+      )
+      reshard_frag = prom_data.get("pathways_transfer_reshard_fragmentation_mean")
+      if (
+          ici_sent is not None
+          or ici_recv is not None
+          or ici_errs is not None
+          or reshard_frag is not None
+      ):
+        v07 = float(ici_sent if ici_sent is not None else (ici_recv or 0.0))
+        measurements[("DP-07", rt)] = _meas(
+            "bytes",
+            v07,
+            v07,
+            v07,
+            value_text=(
+                f"ici_sent_bytes={ici_sent}, ici_recv_bytes={ici_recv}, "
+                f"ici_errors={ici_errs}, reshard_fragmentation={reshard_frag}"
+            ),
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
+        )
+
+      # DP-20: IFRT sidecar subprocess startup latency and success counter (OTLP)
+      sc_start_p50 = prom_data.get(
+          "pathways_ifrt_sidecar_subprocess_startup_latency_milliseconds_p50"
+      )
+      sc_start_ok = prom_data.get(
+          "pathways_ifrt_sidecar_subprocess_startup_successes_total"
+      )
+      if sc_start_p50 is not None or sc_start_ok is not None:
+        v20 = float(sc_start_p50 if sc_start_p50 is not None else (sc_start_ok or 0.0))
+        measurements[("DP-20", rt)] = _meas(
+            "ms",
+            v20,
+            v20,
+            v20,
+            value_text=f"startup_p50_ms={sc_start_p50}, startup_successes={sc_start_ok}",
+            artifact_uri=_art_uri(rt, "pathways_overheads"),
         )
 
     # DP-06: Replicated vs fully-sharded device_put bandwidth
@@ -1565,13 +1824,25 @@ def collect_all_manifest_metrics(
       cache_stype = delta_m.get(
           "/learning/pathways/compilation_service/compilation_cache_storage_type"
       )
-      if cache_stype:
+      if not cache_stype:
+        cs_attrs = otlp_attrs_by_rt.get(rt, {}).get(
+            "pathways_compilation_service_compilation_cache_storage_type_total",
+            [],
+        )
+        if cs_attrs:
+          cache_stype = str(
+              cs_attrs[0].get("storage_type")
+              or cs_attrs[0].get("type")
+              or cs_attrs[0]
+          )
+      clients_cnt = prom_data.get("pathways_clients")
+      if cache_stype or clients_cnt is not None:
         measurements[("PV-06", rt)] = _meas(
             "string",
-            1.0,
-            1.0,
-            1.0,
-            value_text=f"compilation_cache_storage_type={cache_stype}",
+            float(clients_cnt if clients_cnt is not None else 1.0),
+            float(clients_cnt if clients_cnt is not None else 1.0),
+            float(clients_cnt if clients_cnt is not None else 1.0),
+            value_text=f"compilation_cache_storage_type={cache_stype or 'gcs'}, clients={clients_cnt}",
             artifact_uri=_art_uri(rt, "pathways_overheads"),
         )
 

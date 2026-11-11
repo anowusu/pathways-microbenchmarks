@@ -1,8 +1,8 @@
 # Pathways Benchmarking Metrics Manifest (M1 -> M3 -> M4 Contract)
-# 86 total entries: 23 full + 63 brief across 7 layers (CP, RM, WK, DP, ST, CO, PV) + Parity (PA)
+# 91 total entries: 23 full + 68 brief across 7 layers (CP, RM, WK, DP, ST, CO, PV) + Parity (PA)
 
 # ==============================================================================
-# Layer 1: Client / Proxy (CP-01 .. CP-12)
+# Layer 1: Client / Proxy (CP-01 .. CP-13)
 # ==============================================================================
 - id: CP-01
   name: "Proxy hop per case (client wall p50 - device p50, McJAX-normalised)"
@@ -172,8 +172,22 @@
   effort: M
   home: tpums_nightly
 
+- id: CP-13
+  name: "Client live XLA executables, in-flight execution gauge, and RM command request/response payload sizes (pathways_client_executable_inflight_executions, pathways_client_live_xla_executables, pathways_client_resource_manager_command_request_size_bytes)"
+  layer: client_proxy
+  tier: brief
+  dimensions: [D1, D2, D8]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires OTLP exporter (--enable_pathways_metrics --additional_metrics_regex=.*, cl/1018902971, cl/1019381440) or Prometheus exporter probe on pathways-proxy"
+  method: server_log
+  unit: count
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
 # ==============================================================================
-# Layer 2: Resource Manager / Scheduler (RM-01 .. RM-13)
+# Layer 2: Resource Manager / Scheduler (RM-01 .. RM-14)
 # ==============================================================================
 - id: RM-01
   name: "Cluster-ready time: RM ListDevices wait for worker registration, plus client bring-up"
@@ -357,8 +371,22 @@
   effort: S
   home: tpums_nightly
 
+- id: RM-14
+  name: "Worker initial idleness, op-dispatcher dependency fan-out, and component proto decompression latency (pathways_worker_initial_idleness_milliseconds, pathways_worker_dependencies_added_per_item, pathways_worker_component_proto_decompression_latency_milliseconds)"
+  layer: rm_scheduler
+  tier: brief
+  dimensions: [D1, D2, D3, D7]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires OTLP exporter (--enable_pathways_metrics --additional_metrics_regex=.*, cl/1018902971, cl/1019381440) or Prometheus exporter probe on pathways-proxy and pathways-worker"
+  method: server_log
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
 # ==============================================================================
-# Layer 3: Worker / TPU (WK-01 .. WK-14)
+# Layer 3: Worker / TPU (WK-01 .. WK-15)
 # ==============================================================================
 - id: WK-01
   name: "TPU device-time parity of the five TPUMS kernels ('chip speed' ratio Pathways / McJAX)"
@@ -556,8 +584,22 @@
   effort: M
   home: tpums_nightly
 
+- id: WK-15
+  name: "Three-tier compilation cache breakdown (fingerprinting, in-memory cache hits/misses, deduplicated compiles) and persistent cache compression/decompression latency & ratio (pathways_compilation_cache_fingerprint_time_milliseconds, pathways_persistent_compilation_cache_compression_ratio)"
+  layer: worker_tpu
+  tier: brief
+  dimensions: [D8]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires OTLP exporter (--enable_pathways_metrics --additional_metrics_regex=.*, cl/1018902971, cl/1019381440) or Prometheus exporter probe on pathways-proxy"
+  method: server_log
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
 # ==============================================================================
-# Layer 4: Data Path & Sidecar (DP-01 .. DP-06, DP-10 .. DP-19)
+# Layer 4: Data Path & Sidecar (DP-01 .. DP-07, DP-10 .. DP-20)
 # ==============================================================================
 - id: DP-01
   name: "Client-to-device and device-to-client transfer bandwidth on Pathways vs host-to-device PCIe on McJAX (TPUMS host_to_device/device_to_host)"
@@ -639,6 +681,20 @@
   blocker: null
   method: client_timer
   unit: GB/s
+  priority: P1
+  effort: M
+  home: tpums_nightly
+
+- id: DP-07
+  name: "Pathways ICI transport volume, send-buffer error counter, and reshard fragmentation (pathways_transport_ici_sent_bytes_total, pathways_transport_ici_send_buffer_errors_total, pathways_transfer_reshard_fragmentation)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D4, D5]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires OTLP exporter (--enable_pathways_metrics --additional_metrics_regex=.*, cl/1018902971, cl/1019381440) or Prometheus exporter probe on pathways-worker"
+  method: server_log
+  unit: bytes
   priority: P1
   effort: M
   home: tpums_nightly
@@ -782,6 +838,20 @@
   priority: P2
   effort: L
   home: "other:Orbax Checkpoint Benchmark Harness / MaxText e2e"
+
+- id: DP-20
+  name: "IFRT sidecar subprocess startup latency and success counter (pathways_ifrt_sidecar_subprocess_startup_latency_milliseconds, pathways_ifrt_sidecar_subprocess_startup_successes_total)"
+  layer: datapath_sidecar
+  tier: brief
+  dimensions: [D10, D7]
+  runtimes: [louhi]
+  collectable_today: probe
+  blocker: "requires OTLP exporter (--enable_pathways_metrics --additional_metrics_regex=.*, cl/1018902971, cl/1019381440) with sidecar subprocess enabled"
+  method: server_log
+  unit: ms
+  priority: P1
+  effort: M
+  home: tpums_nightly
 
 # ==============================================================================
 # Layer 5: Storage / Checkpointing (ST-01 .. ST-08)

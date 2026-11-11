@@ -43,9 +43,14 @@ _RUN = """set -o pipefail
 git clone --depth 1 --branch "$TPUMS_REF" "$TPUMS_REPO" /tmp/tpums
 cd /tmp/tpums && pip install -q -e '.[pathways]' && mkdir -p /tmp/results
 git rev-parse HEAD > /tmp/results/git_commit.txt
+PYTHONPATH=/tmp/tpums python3 -m automation.daily.otlp_receiver --port 4317 --output /tmp/results/otlp_metrics.json >/tmp/results/otlp_receiver.log 2>&1 &
+OTLP_PID=$!
 tpums benchmark run-config "$TPUMS_CONFIG" --output_dir=/tmp/results \\
     --xprof_dir="$GCS_XPROF_DIR" 2>&1 | tee /tmp/results/execution.log
 rc=$?
+sleep 3
+kill -TERM "$OTLP_PID" 2>/dev/null || true
+wait "$OTLP_PID" 2>/dev/null || true
 curl -sf --max-time 4 http://localhost:9090/metrics > /tmp/results/prom_head_9090.txt 2>/dev/null || true
 curl -sf --max-time 4 http://localhost:9091/metrics > /tmp/results/prom_head_9091.txt 2>/dev/null || true
 WORKER0_HOST="${HOSTNAME%-pathways-head*}-pathways-worker-0-0.${HOSTNAME%-pathways-head*}"

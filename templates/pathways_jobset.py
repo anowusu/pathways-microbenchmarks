@@ -41,6 +41,8 @@ _IMAGE = "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
 # containers with glibc >= 2.35 (see op_flags.yaml); glibc reads it at process
 # start.
 _DCN_GLIBC_TUNABLES = "glibc.pthread.rseq=0"
+# libtpu's flag for the enhanced launch barrier (see `pathways_op_flags`).
+_BARRIER_FLAG = "--xla_tpu_use_enhanced_launch_barrier"
 _DCN_BENCHMARK_PREFIX = "dcn_"
 _DEFAULT_DCN_NUM_SLICES = 2
 # Results (summary.csv, detailed.json, git_commit.txt, execution.log) go to
@@ -111,6 +113,28 @@ def benchmark_op_flags(
   flags = [str(flag) for flag in op_flags.get("flags") or []]
   env = {key: str(value) for key, value in (op_flags.get("env") or {}).items()}
   return flags, env
+
+
+def pathways_op_flags(flags: list[str]) -> list[str]:
+  """Returns the op flags as Pathways on Cloud can run them.
+
+  One flag cannot be passed on as it is: op_flags.yaml turns the enhanced
+  launch barrier off for dcn_all_reduce
+  (--xla_tpu_use_enhanced_launch_barrier=false). Whether the barrier is on is
+  part of the slice topology a worker reports, and the resource manager of
+  the Pathways on Cloud images only accepts workers that have it on ("The
+  newly added slice topology is not expected by the resource manager", then
+  the resource manager exits). No supported flag changes that, so the workers
+  and the proxy keep the barrier on. It is the one libtpu flag that differs
+  from a McJAX run of the same benchmark.
+
+  Args:
+    flags: The op flags of the benchmark (op_flags.yaml or an override file).
+  """
+  return [
+      f"{_BARRIER_FLAG}=true" if flag.partition("=")[0] == _BARRIER_FLAG else flag
+      for flag in flags
+  ]
 
 
 def default_num_slices(config_path: str) -> int:
@@ -187,10 +211,8 @@ def build_pathways_jobset(
   # LIBTPU_INIT_ARGS. On Pathways the proxy compiles and the workers execute,
   # so both take the flags on their command line (the open-source binaries
   # forward --xla_* and --megascale_* flags to libtpu). The resource manager
-  # takes them as well: it derives the slice topology it expects from its own
-  # flags, and rejects workers whose topology differs ("The newly added slice
-  # topology is not expected by the resource manager"). dcn_all_reduce's
-  # --xla_tpu_use_enhanced_launch_barrier=false is such a flag.
+  # takes none of them.
+  flags = pathways_op_flags(flags)
   worker_kwargs: dict[str, Any] = {}
   if flags:
     worker_kwargs["args"] = flags
@@ -217,7 +239,6 @@ def build_pathways_jobset(
       labels=labels or None,
       head_pod_spec_kwargs=pod_spec_kwargs,
       worker_pod_spec_kwargs=pod_spec_kwargs,
-      rm_container_kwargs={"args": flags} if flags else None,
       proxy_container_kwargs={"args": flags} if flags else None,
       worker_container_kwargs=worker_kwargs or None,
   )

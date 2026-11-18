@@ -183,24 +183,36 @@ class WorkloadNamingTest(parameterized.TestCase):
     worker_container = worker["template"]["spec"]["template"]["spec"]["containers"][0]
     env = {e["name"]: e.get("value") for e in worker_container["env"]}
     self.assertEqual(env["GLIBC_TUNABLES"], "glibc.pthread.rseq=0")
-    # The op flags reach the workers, the proxy and the resource manager: the
-    # resource manager rejects workers whose topology flags differ from its own
-    # (--xla_tpu_use_enhanced_launch_barrier is one).
+    # The op flags reach the workers and the proxy. Pathways on Cloud only
+    # accepts workers with the enhanced launch barrier on, so the one flag
+    # op_flags.yaml sets otherwise for dcn_all_reduce is turned back on.
     proxy = next(c for c in head_spec["initContainers"] if c["name"] == "pathways-proxy")
-    for container in (worker_container, proxy, rm):
+    for container in (worker_container, proxy):
       self.assertIn(
-          "--xla_tpu_use_enhanced_launch_barrier=false",
+          "--xla_tpu_use_enhanced_launch_barrier=true",
           container["args"],
           container["name"],
       )
+      self.assertNotIn(
+          "--xla_tpu_use_enhanced_launch_barrier=false", container["args"]
+      )
+      self.assertIn("--megascale_max_reduction_shard_size=16777216", container["args"])
       # v5e hosts cannot hold op_flags.yaml's 128 GiB premap: op_flags/v5e.yaml.
       self.assertIn(
           "--megascale_grpc_premap_memory_bytes=68719476736",
           container["args"],
           container["name"],
       )
-    # The resource manager keeps its own arguments.
+    # The resource manager keeps its own arguments and takes no op flag, and
+    # nothing overrides what it expects of the workers.
     self.assertIn("--instance_type=tpuv5e:4x8", rm["args"])
+    self.assertFalse(
+        [
+            a
+            for a in rm["args"]
+            if a.startswith(("--xla_", "--megascale_", "--pathways_", "--temporary_"))
+        ]
+    )
 
   @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
   def test_pathways_manifest_keeps_upstream_op_flags_elsewhere(self):

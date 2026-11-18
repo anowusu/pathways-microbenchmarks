@@ -86,17 +86,23 @@ spec:
               imagePullPolicy: Always
               command: ["python", "-m", "automation.daily.daily_runner"]
               env:
-                # Decision 3 + OTLP (b/573605374, cl/1018902971..cl/1019381440):
-                # Consume the digest-pinned OSS server and proxy_server images built
-                # from cl/1019381440 (which include both cl/1012570033 PJRT profiler
-                # registration and the 91-metric OTLP push exporter).
+                # Decision 3 + OTLP (b/573605374): consume the digest-pinned OSS
+                # server and proxy_server images built from cl/1023125763, the
+                # top of the OTLP exporter stack, on google3 CL 1024892475
+                # (2026-11-18). They include the cl/1012570033 PJRT profiler
+                # registration and the OTLP push exporter.
                 - name: TPUMS_LOUHI_SERVER_IMAGE
-                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server@sha256:368203e820cdb8009cc449ba1ad8f44a25763cec133d4a0bc8b8f3bfa0d2b47b"
+                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server@sha256:0049edffdd90d0e89849bdea0be3d9c115e7c6cf25ed2286a14833a7365ad8de"
                 - name: TPUMS_LOUHI_PROXY_IMAGE
-                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/proxy_server@sha256:5270798ba7bb11c975064f92c8d545444a71fe232cdc4cdf4e4e518a900da83b"
+                  value: "us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/proxy_server@sha256:8cb74c582d96757856ed2f2effce0cffee64a74e02ec67a601d429c65c69acb2"
                 - name: TPUMS_LOUHI_VERSION
-                  value: "cl-1019381440"
+                  value: "cl-1023125763"
                 - name: TPUMS_ENABLE_OTLP_METRICS
+                  value: "1"
+                # cl/1023125767 and cl/1023125763 remove the Prometheus and
+                # metric-delta-log exporters; a binary built from them exits on
+                # those temporary debugging flags, so they are no longer passed.
+                - name: TPUMS_DISABLE_PATHWAYS_DEBUG_EXPORTERS
                   value: "1"
                 # Decision 5: Distinct `tpmd-` JobSet name prefix and `app` label.
                 - name: TPUMS_WORKLOAD_PREFIX

@@ -457,6 +457,20 @@ PATHWAYS_OTLP_ARGS = (
 )
 
 
+def _pathways_debug_exporters_enabled() -> bool:
+  """Whether to pass `PATHWAYS_EXPORTER_DEBUG_ARG` to the Pathways binaries.
+
+  The Prometheus and metric-delta-log exporters behind those temporary flags
+  are removed by cl/1023125767 and cl/1023125763, and a Pathways binary exits
+  on a temporary flag it does not know. Set
+  `TPUMS_DISABLE_PATHWAYS_DEBUG_EXPORTERS=1` when the pinned images are built
+  from those CLs or later; OTLP is then the only metrics export.
+  """
+  return os.environ.get(
+      "TPUMS_DISABLE_PATHWAYS_DEBUG_EXPORTERS", ""
+  ).strip().lower() not in ("1", "true", "yes")
+
+
 def _runtime_supports_otlp_flags(runtime: runtimes_lib.Runtime) -> bool:
   """Returns True when `runtime` uses a Pathways build supporting `--enable_pathways_metrics`."""
   if os.environ.get("TPUMS_ENABLE_OTLP_METRICS", "").strip().lower() in (
@@ -659,7 +673,10 @@ def generate_pathways_manifest(
   )
   raw_yaml = yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
   extra_pw_args: list[str] = []
-  if "pathways_overheads" in str(config_rel_path):
+  if (
+      "pathways_overheads" in str(config_rel_path)
+      and _pathways_debug_exporters_enabled()
+  ):
     extra_pw_args.append(PATHWAYS_EXPORTER_DEBUG_ARG)
   if _runtime_supports_otlp_flags(runtime):
     extra_pw_args.extend(PATHWAYS_OTLP_ARGS)

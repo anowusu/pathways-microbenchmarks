@@ -212,6 +212,55 @@ class WorkloadNamingTest(parameterized.TestCase):
       pod_spec = replicated_job["template"]["spec"]["template"]["spec"]
       self.assertEqual(pod_spec["priorityClassName"], "medium", replicated_job["name"])
 
+  @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
+  def test_pathways_debug_exporter_flags_can_be_disabled(self):
+    def pathways_args(disable):
+      env = {"TPUMS_DISABLE_PATHWAYS_DEBUG_EXPORTERS": disable}
+      with mock.patch.dict(os.environ, env):
+        manifest = workload_submitter.generate_pathways_manifest(
+            workload_name="tpmd-louhi-pathways-ov",
+            namespace="default",
+            queue_name="multislice-queue",
+            priority_class="",
+            topology="4x8",
+            docker_image="img:latest",
+            config_rel_path="configs/v5e/4x8/pathways_overheads.yaml",
+            gcs_output_dir="gs://b/2026-11-18/louhi/pathways_overheads",
+            runtime=runtimes.LOUHI,
+        )
+      args = {}
+      for replicated_job in yaml.safe_load(manifest)["spec"]["replicatedJobs"]:
+        pod_spec = replicated_job["template"]["spec"]["template"]["spec"]
+        for c in pod_spec.get("initContainers", []) + pod_spec["containers"]:
+          if c["name"].startswith("pathways-"):
+            args[c["name"]] = c.get("args") or []
+      return args
+
+    with_debug = pathways_args("")
+    without_debug = pathways_args("1")
+    self.assertEqual(
+        set(with_debug), {"pathways-rm", "pathways-proxy", "pathways-worker"}
+    )
+    for name, container_args in with_debug.items():
+      self.assertIn(
+          workload_submitter.PATHWAYS_EXPORTER_DEBUG_ARG, container_args, name
+      )
+    for name, container_args in without_debug.items():
+      self.assertEmpty(
+          [a for a in container_args if "temporary_flags_for_debugging" in a],
+          name,
+      )
+      # Only the debugging flags are dropped.
+      self.assertEqual(
+          container_args,
+          [
+              a
+              for a in with_debug[name]
+              if a != workload_submitter.PATHWAYS_EXPORTER_DEBUG_ARG
+          ],
+          name,
+      )
+
   def test_mcjax_manifest_pod_priority_class_is_optional(self):
     common = dict(
         workload_name="tpums-4x8-mcjax-gemm",

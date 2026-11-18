@@ -710,6 +710,8 @@ _ROW_KEYS = (
     "wall_clock_p50_ms", "wall_clock_p90_ms", "wall_clock_avg_ms",
     "xprof_bandwidth_per_chip_gb_s", "wall_clock_bandwidth_per_chip_gb_s",
     "xprof_bandwidth_per_device_gb_s", "wall_clock_bandwidth_per_device_gb_s",
+    "xprof_bandwidth_per_host_gbps", "wall_clock_bandwidth_per_host_gbps",
+    "replica_group_rank",
     "xprof_tflops_per_device", "wall_clock_tflops_per_device",
     "xprof_tflops_per_chip", "wall_clock_tflops_per_chip",
     "node_pools", "pathways_server_digest", "client_image_digest", "git_commit",

@@ -146,7 +146,9 @@ def _is_metric(key: str) -> bool:
 
 def benchmark_type_of(category: str) -> str:
   """Maps an aggregator category to uBench's `collective` / `compute`."""
-  return "collective" if category == "collectives" else "compute"
+  if category in ("collectives", "dcn_collectives"):
+    return "collective"
+  return "compute"
 
 
 # Row columns that identify the build or placement, not the benchmark case.

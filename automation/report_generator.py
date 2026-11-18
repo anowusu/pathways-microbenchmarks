@@ -51,6 +51,13 @@ CATEGORY_TITLES = {
             " reduce-scatter"
         ),
     ),
+    "dcn_collectives": (
+        "🌐 DCN Collectives (between slices)",
+        (
+            "All-reduce and all-to-all between slices over the data center"
+            " network; device time is the XLA module execution on device 0"
+        ),
+    ),
     "hbm": (
         "💾 High Bandwidth Memory (HBM)",
         "On-device HBM memory copy bandwidth",

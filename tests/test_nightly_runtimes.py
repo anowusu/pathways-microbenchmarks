@@ -132,6 +132,65 @@ class WorkloadNamingTest(parameterized.TestCase):
     self.assertEqual(name, expected)
     self.assertLessEqual(len(name), workload_submitter.PATHWAYS_WORKLOAD_NAME_MAX_LEN)
 
+  def test_dcn_pathways_names_stay_distinct_after_a_retry(self):
+    names = {
+        config: workload_submitter.runtime_workload_name(runtimes.LOUHI, config, "4x8")
+        for config in ("dcn_all_reduce", "dcn_all_to_all")
+    }
+    self.assertEqual(
+        names,
+        {"dcn_all_reduce": "tpums-louhi-dcn-ar", "dcn_all_to_all": "tpums-louhi-dcn-a2a"},
+    )
+    retries = {workload_submitter.retry_workload_name(n, 2) for n in names.values()}
+    self.assertLen(retries, 2)
+    for name in retries:
+      self.assertLessEqual(len(name), workload_submitter.PATHWAYS_WORKLOAD_NAME_MAX_LEN)
+
+  def test_workload_prefix_applies_to_every_runtime(self):
+    self.assertEqual(
+        workload_submitter.runtime_workload_name(
+            runtimes.RAPID, "all_gather", "4x8", prefix="mb"
+        ),
+        "mb-rapid-all-gather",
+    )
+    self.assertEqual(
+        workload_submitter.runtime_workload_name(
+            runtimes.MCJAX, "all_gather", "4x8", prefix="mb"
+        ),
+        "mb-4x8-mcjax-all-gather",
+    )
+
+  @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
+  def test_pathways_manifest_multi_slice(self):
+    manifest = workload_submitter.generate_pathways_manifest(
+        workload_name="tpums-louhi-dcn-ar",
+        namespace="default",
+        queue_name="multislice-queue",
+        priority_class="",
+        topology="4x8",
+        docker_image="img:latest",
+        config_rel_path="configs/v5e/4x8/dcn_all_reduce.yaml",
+        gcs_output_dir="gs://b/2026-11-18/louhi/dcn_all_reduce",
+        runtime=runtimes.LOUHI,
+        num_slices=2,
+    )
+    head, worker = yaml.safe_load(manifest)["spec"]["replicatedJobs"]
+    self.assertEqual(worker["replicas"], 2)
+    self.assertEqual(worker["template"]["spec"]["parallelism"], 8)
+    head_spec = head["template"]["spec"]["template"]["spec"]
+    rm = next(c for c in head_spec["initContainers"] if c["name"] == "pathways-rm")
+    self.assertIn("--instance_count=2", rm["args"])
+    worker_container = worker["template"]["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e.get("value") for e in worker_container["env"]}
+    self.assertEqual(env["GLIBC_TUNABLES"], "glibc.pthread.rseq=0")
+    # The megascale flags of op_flags.yaml reach the workers and the proxy.
+    proxy = next(c for c in head_spec["initContainers"] if c["name"] == "pathways-proxy")
+    for container in (worker_container, proxy):
+      self.assertTrue(
+          [a for a in container["args"] if a.startswith("--megascale_")],
+          container["name"],
+      )
+
   def test_mcjax_names_keep_topology_and_runtime(self):
     self.assertEqual(
         workload_submitter.runtime_workload_name(runtimes.MCJAX, "all_gather", "4x8"),

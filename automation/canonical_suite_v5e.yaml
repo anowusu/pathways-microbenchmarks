@@ -1,5 +1,6 @@
 # Canonical benchmark configurations for the TPUMS nightly comparison of
-# McJAX and Pathways on Cloud on GKE TPU v5e (one 4x8 slice: 8 hosts, 32 chips).
+# McJAX and Pathways on Cloud on GKE TPU v5e (one 4x8 slice: 8 hosts, 32 chips;
+# the DCN collectives run between two such slices).
 #
 # Every config runs once per runtime listed under `runtimes:` (override with
 # --runtimes). `mcjax` runs one JAX process per host; `louhi` and `rapid` run
@@ -23,3 +24,8 @@ configs:
   # Per-chip compute and memory benchmarks on the same slice
   - configs/v5e/4x8/gemm.yaml
   - configs/v5e/4x8/hbm.yaml
+
+  # Collectives between two 4x8 slices over the data center network (DCN).
+  # `dcn_*` benchmarks get two slices each (see automation/utils.py).
+  - configs/v5e/4x8/dcn_all_reduce.yaml
+  - configs/v5e/4x8/dcn_all_to_all.yaml

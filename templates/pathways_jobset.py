@@ -3,7 +3,8 @@
 The Pathways counterpart of gke_job_template.yaml: a single TPUMS client in the
 `pathways-head` pod drives every TPU of the slice through the Pathways proxy
 (JAX_PLATFORMS=proxy), and the Pathways workers write the XProf traces to GCS.
-Results land in <gcs_dir>/results and traces in <gcs_dir>/xprof.
+Results land in <gcs_dir>/results and traces in <gcs_dir>/xprof. DCN (`dcn_*`)
+benchmarks get two slices of the topology unless --num_slices says otherwise.
 
 Requires kubectl credentials for the cluster and
 `pip install "kubernetes>=28" "pathwaysutils>=0.1.13"` (for `PathwaysJobSet`).
@@ -36,6 +37,12 @@ _PROXY_IMAGE = jobset.DEFAULT_PATHWAYS_PROXY_IMAGE
 # Same client image as gke_job_template.yaml. `pip install` pins the JAX version
 # of pyproject.toml, which the Pathways image tag has to match.
 _IMAGE = "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
+# Multi-slice (DCN) benchmarks need this in the worker environment on
+# containers with glibc >= 2.35 (see op_flags.yaml); glibc reads it at process
+# start.
+_DCN_GLIBC_TUNABLES = "glibc.pthread.rseq=0"
+_DCN_BENCHMARK_PREFIX = "dcn_"
+_DEFAULT_DCN_NUM_SLICES = 2
 # Results (summary.csv, detailed.json, git_commit.txt, execution.log) go to
 # $GCS_RESULTS_DIR, the XProf traces the Pathways workers write to
 # $GCS_XPROF_DIR; both default to <gcs_dir>/results and <gcs_dir>/xprof.
@@ -61,6 +68,12 @@ def _parse_args() -> argparse.Namespace:
   add("--gcs_dir", required=True, help="gs:// directory of this run.")
   add("--tpu_type", default="v5e")
   add("--topology", default="4x8")
+  add(
+      "--num_slices",
+      type=int,
+      default=0,
+      help="Slices of --topology (default: 2 for dcn_* benchmarks, else 1).",
+  )
   add("--pathways_version", default="20261028-jax_0.12.0", help="Image tag.")
   add("--pathways_server_image", default=_SERVER_IMAGE, help="RM/worker image.")
   add("--pathways_proxy_image", default=_PROXY_IMAGE, help="Proxy image.")
@@ -90,6 +103,18 @@ def benchmark_op_flags(config_path: str) -> tuple[list[str], dict[str, str]]:
   return flags, env
 
 
+def default_num_slices(config_path: str) -> int:
+  """Returns the slices a config needs: 2 for `dcn_*` benchmarks, else 1.
+
+  Args:
+    config_path: TPUMS config, relative to the repository root.
+  """
+  config = yaml.safe_load((_REPO_ROOT / config_path).read_text())
+  if str(config["benchmark"]["name"]).startswith(_DCN_BENCHMARK_PREFIX):
+    return _DEFAULT_DCN_NUM_SLICES
+  return 1
+
+
 def build_pathways_jobset(
     name: str,
     config: str,
@@ -97,6 +122,7 @@ def build_pathways_jobset(
     *,
     tpu_type: str = "v5e",
     topology: str = "4x8",
+    num_slices: int = 1,
     pathways_version: str = "latest",
     pathways_server_image: str = _SERVER_IMAGE,
     pathways_proxy_image: str = _PROXY_IMAGE,
@@ -120,6 +146,8 @@ def build_pathways_jobset(
       `<gcs_dir>/pathways`.
     tpu_type: Pathways TPU type, e.g. `v5e`.
     topology: Slice topology, e.g. `4x8`.
+    num_slices: Number of slices of `topology`; more than one for DCN
+      benchmarks, whose collectives run between slices.
     pathways_version: Tag of both Pathways images.
     pathways_server_image: Resource manager / worker image, without tag.
     pathways_proxy_image: Proxy image, without tag.
@@ -149,6 +177,8 @@ def build_pathways_jobset(
   worker_kwargs: dict[str, Any] = {}
   if flags:
     worker_kwargs["args"] = flags
+  if num_slices > 1:
+    env = {"GLIBC_TUNABLES": _DCN_GLIBC_TUNABLES, **env}
   if env:
     worker_kwargs["env"] = env
   labels = dict(extra_labels or {})
@@ -163,7 +193,7 @@ def build_pathways_jobset(
       pathways_dir=f"{gcs_dir}/pathways",
       tpu_type=tpu_type,
       topology=topology,
-      num_slices=1,
+      num_slices=num_slices,
       pathways_version=pathways_version,
       pathways_rm_and_worker_image=pathways_server_image,
       pathways_proxy_image=pathways_proxy_image,
@@ -197,6 +227,7 @@ def build_jobset(args: argparse.Namespace) -> jobset.PathwaysJobSet:
       gcs_dir=args.gcs_dir,
       tpu_type=args.tpu_type,
       topology=args.topology,
+      num_slices=args.num_slices or default_num_slices(args.config),
       pathways_version=args.pathways_version,
       pathways_server_image=args.pathways_server_image,
       pathways_proxy_image=args.pathways_proxy_image,

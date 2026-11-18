@@ -442,41 +442,67 @@ def infer_topology_from_config(config_path: str) -> str:
   return topology
 
 
+# Every JobSet name starts with this prefix. A second pipeline on the same
+# cluster (a trial run, the daily metrics run) sets another one so that its
+# fixed-name Pathways JobSets never collide with the hourly run's.
+DEFAULT_WORKLOAD_PREFIX = os.environ.get("TPUMS_WORKLOAD_PREFIX", "tpums")
+
+
 def sanitize_workload_name(
-    base_name: str, topology: str, max_len: int = 45
+    base_name: str,
+    topology: str,
+    max_len: int = 45,
+    prefix: str = DEFAULT_WORKLOAD_PREFIX,
 ) -> str:
   """Generates a safe DNS-compliant Kubernetes JobSet name incorporating topology without timestamps."""
   clean_base = re.sub(r"[^a-z0-9-]", "-", base_name.lower()).strip("-")
   clean_topo = re.sub(r"[^a-z0-9-]", "-", topology.lower()).strip("-")
   if clean_topo and clean_topo not in clean_base:
     clean_base = f"{clean_topo}-{clean_base}"
-  full_name = re.sub(r"-+", "-", f"tpums-{clean_base}").strip("-")
+  full_name = re.sub(r"-+", "-", f"{prefix}-{clean_base}").strip("-")
   return full_name[:max_len].rstrip("-")
 
 
 # Pathways JobSet names stay within gcluster's and uBench's 22-character limit
 # so the derived pod and service names fit Kubernetes' 63-character labels.
-PATHWAYS_WORKLOAD_NAME_MAX_LEN = 22
+# Clusters with a tighter limit lower it with TPUMS_PATHWAYS_NAME_MAX_LEN.
+PATHWAYS_WORKLOAD_NAME_MAX_LEN = int(
+    os.environ.get("TPUMS_PATHWAYS_NAME_MAX_LEN", "22")
+)
+# Short forms of config names in Pathways JobSet names. Without them the names
+# of the DCN configs differ only past the length limit once a retry suffix is
+# appended (`tpums-louhi-dcn-all-r2` for both).
+_PATHWAYS_CONFIG_NAME_ALIASES = {
+    "dcn_all_reduce": "dcn-ar",
+    "dcn_all_to_all": "dcn-a2a",
+}
 
 
 def runtime_workload_name(
-    runtime: runtimes_lib.Runtime, config_name: str, topology: str
+    runtime: runtimes_lib.Runtime,
+    config_name: str,
+    topology: str,
+    prefix: str = DEFAULT_WORKLOAD_PREFIX,
 ) -> str:
   """Returns the JobSet name of `config_name` on `runtime`.
 
-  McJAX names follow `sanitize_workload_name` (`tpums-<topology>-<runtime>-
+  McJAX names follow `sanitize_workload_name` (`<prefix>-<topology>-<runtime>-
   <config>`, completed by `generateName`). Pathways names are
-  `tpums-<runtime>-<config>` truncated to `PATHWAYS_WORKLOAD_NAME_MAX_LEN`.
+  `<prefix>-<runtime>-<config>` truncated to `PATHWAYS_WORKLOAD_NAME_MAX_LEN`.
 
   Args:
     runtime: The runtime.
     config_name: Config file stem, e.g. `all_gather`.
     topology: Slice topology, e.g. `4x8`.
+    prefix: First component of the name.
   """
   if not runtime.is_pathways:
-    return sanitize_workload_name(f"{runtime.name}-{config_name}", topology)
+    return sanitize_workload_name(
+        f"{runtime.name}-{config_name}", topology, prefix=prefix
+    )
+  config_name = _PATHWAYS_CONFIG_NAME_ALIASES.get(config_name, config_name)
   clean = re.sub(r"[^a-z0-9-]", "-", f"{runtime.name}-{config_name}".lower())
-  name = re.sub(r"-+", "-", f"tpums-{clean}").strip("-")
+  name = re.sub(r"-+", "-", f"{prefix}-{clean}").strip("-")
   return name[:PATHWAYS_WORKLOAD_NAME_MAX_LEN].rstrip("-")
 
 
@@ -505,6 +531,7 @@ def generate_pathways_manifest(
     git_branch: str = utils.DEFAULT_GIT_BRANCH,
     accelerator: Optional[str] = None,
     pod_priority_class: str = "",
+    num_slices: int = 1,
 ) -> str:
   """Generates the Pathways JobSet manifest of one config on a Pathways runtime.
 
@@ -528,6 +555,8 @@ def generate_pathways_manifest(
     accelerator: Accelerator family (`v5e`, `v6e`, `tpu7x`); inferred from
       the config path if None.
     pod_priority_class: Pod PriorityClass of head and worker pods ("" = none).
+    num_slices: Number of slices of `topology` the JobSet gets (more than one
+      for DCN benchmarks).
 
   Returns:
     The JobSet manifest YAML.
@@ -560,6 +589,7 @@ def generate_pathways_manifest(
           else None
       ),
       pod_priority_class=pod_priority_class,
+      num_slices=num_slices,
   )
   return yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
 
@@ -582,8 +612,14 @@ def generate_jobset_manifest(
     topo_info: Optional[dict[str, Any]] = None,
     git_repo: str = utils.DEFAULT_GIT_REPO,
     pod_priority_class: str = "",
+    num_slices: int = 1,
 ) -> str:
-  """Generates a native GKE JobSet manifest using automation/jobset_template.yaml."""
+  """Generates a native GKE JobSet manifest using automation/jobset_template.yaml.
+
+  `num_slices` is the number of slices of `topology` the JobSet gets: one
+  `slice-job` replica each. With more than one (DCN benchmarks), the container
+  also gets the GLIBC_TUNABLES value multi-slice benchmarks need.
+  """
   if topo_info is None:
     acc = utils.infer_accelerator(
         accelerator, config_path=config_rel_path, topology=topology
@@ -614,6 +650,8 @@ def generate_jobset_manifest(
       "${ACCELERATOR}": topo_info["gke_accelerator"],
       "${TOPOLOGY}": topology,
       "${EXCLUSIVE_TOPOLOGY}": exclusive_topology,
+      "${NUM_SLICES}": str(num_slices),
+      "${GLIBC_TUNABLES}": utils.DCN_GLIBC_TUNABLES if num_slices > 1 else "",
       "${PARALLELISM}": str(num_nodes),
       "${COMPLETIONS}": str(num_nodes),
       "${CONFIG_PATH}": config_rel_path,
@@ -1375,6 +1413,8 @@ class WorkloadManager:
             self.accelerator, config_path=rel_path, topology=topology
         )
         topo_info = utils.compute_topology_info(topology, accelerator=acc)
+        # DCN benchmarks run on several slices of `topology`.
+        num_slices = utils.config_num_slices(rel_path)
         render_manifest: Optional[Callable[[str], str]] = None
         if runtime.is_pathways:
 
@@ -1386,6 +1426,7 @@ class WorkloadManager:
               _topo: str = topology,
               _gcs: str = gcs_output_dir,
               _acc: str = acc,
+              _slices: int = num_slices,
           ) -> str:
             return generate_pathways_manifest(
                 workload_name=name,
@@ -1401,11 +1442,12 @@ class WorkloadManager:
                 git_branch=self.git_branch,
                 accelerator=_acc,
                 pod_priority_class=self.pod_priority_class,
+                num_slices=_slices,
             )
 
           manifest = render_manifest(workload_name)
-          # The Pathways head pod plus one pod per TPU host.
-          total_pods = topo_info["num_nodes"] + 1
+          # The Pathways head pod plus one pod per TPU host of every slice.
+          total_pods = topo_info["num_nodes"] * num_slices + 1
         else:
           manifest = generate_jobset_manifest(
               workload_name=workload_name,
@@ -1425,8 +1467,9 @@ class WorkloadManager:
               topo_info=topo_info,
               git_repo=self.git_repo,
               pod_priority_class=self.pod_priority_class,
+              num_slices=num_slices,
           )
-          total_pods = topo_info["num_nodes"]
+          total_pods = topo_info["num_nodes"] * num_slices
 
         if self.dry_run:
           print(

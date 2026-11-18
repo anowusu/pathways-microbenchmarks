@@ -91,6 +91,21 @@ CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
         "xprof_p50_ms",
         "xprof_bandwidth_per_chip_gb_s",
     ),
+    # Collectives between slices over the data center network. They run on
+    # `replica_group_rank` slices of `topology` and report per-host bandwidth.
+    "dcn_collectives": (
+        "runtime",
+        "topology",
+        "benchmark",
+        "dtype",
+        "matrix_dim",
+        "replica_group_rank",
+        "shard_size_mib",
+        "xprof_p50_ms",
+        "wall_clock_p50_ms",
+        "xprof_bandwidth_per_host_gbps",
+        "wall_clock_bandwidth_per_host_gbps",
+    ),
     "hbm": (
         "runtime",
         "benchmark",
@@ -146,6 +161,8 @@ CATEGORY_LEADING_COLUMNS: dict[str, tuple[str, ...]] = {
 # underscore separators only; `infer_category_from_path` normalizes hyphens
 # before matching.
 _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Before "collectives": `dcn_all_reduce` also contains `all_reduce`.
+    ("dcn_collectives", ("dcn_all_reduce", "dcn_all_to_all")),
     (
         "collectives",
         (
@@ -244,7 +261,7 @@ def normalize_row(
     # Runtime columns lead; summary.csv columns keep their order after them.
     norm = {**stamped, **{k: v for k, v in norm.items() if k not in stamped}}
 
-  if category == "collectives":
+  if category in ("collectives", "dcn_collectives"):
     if topology:
       norm.setdefault("topology", topology)
 

@@ -27,6 +27,8 @@
 #   export ACCELERATOR="tpu7x"  # REQUIRED: "tpu7x" or "tpu-v6e-slice"
 #   export TOPOLOGY="2x2x1"
 #   export EXCLUSIVE_TOPOLOGY="kubernetes.io/hostname"  # or "cloud.google.com/gke-nodepool" for multi-host
+#   export NUM_SLICES="1"       # 2 or more for multi-slice (DCN) benchmarks
+#   export GLIBC_TUNABLES=""    # "glibc.pthread.rseq=0" for multi-slice benchmarks
 #   export PARALLELISM="1"
 #   export COMPLETIONS="1"
 #   export CHIPS_PER_NODE="4"
@@ -60,8 +62,10 @@ spec:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
   replicatedJobs:
+    # One replica per slice. With more than one, GKE injects the MEGASCALE_*
+    # variables that connect the slices over the data center network.
     - name: slice-job
-      replicas: 1
+      replicas: ${NUM_SLICES}
       template:
         spec:
           parallelism: ${PARALLELISM}
@@ -130,6 +134,14 @@ spec:
                       value: "1800"
                     - name: JAX_COORDINATOR_TIMEOUT_SECONDS
                       value: "1800"
+                    # Empty except for multi-slice (DCN) benchmarks.
+                    - name: GLIBC_TUNABLES
+                      value: "${GLIBC_TUNABLES}"
+                    # Index of this pod's slice (its slice-job replica).
+                    - name: SLICE_INDEX
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
                   command:
                     - /bin/bash
                     - -c
@@ -168,13 +180,35 @@ spec:
                         gcloud storage cp -r /tmp/tensorboard "${GCS_OUTPUT_DIR}/tensorboard" || true
                       fi
 
-                      # Every worker writes the same /tmp/results files (summary.csv,
-                      # detailed.json, git_commit.txt), so only worker 0 publishes them:
-                      # concurrent writes to one GCS object race and get rate-limited.
-                      # Logs differ per worker, so each one keeps its own. Keep the
-                      # literal ${JOB_COMPLETION_INDEX:-0} form: envsubst leaves it as is.
-                      gcloud storage cp /tmp/execution.log "${GCS_OUTPUT_DIR}/execution_${JOB_COMPLETION_INDEX:-0}.log" || true
-                      if [ "${JOB_COMPLETION_INDEX:-0}" = "0" ]; then
+                      # Logs differ per worker, so each one keeps its own
+                      # (execution_<worker>.log, and for the other slices
+                      # execution_s<slice>_<worker>.log). Keep the literal
+                      # ${VAR:-default} forms: envsubst leaves them as they are.
+                      LOG_NAME="execution_${JOB_COMPLETION_INDEX:-0}.log"
+                      if [ "${SLICE_INDEX:-0}" != "0" ]; then
+                        LOG_NAME="execution_s${SLICE_INDEX:-0}_${JOB_COMPLETION_INDEX:-0}.log"
+                      fi
+                      gcloud storage cp /tmp/execution.log "${GCS_OUTPUT_DIR}/${LOG_NAME:-execution.log}" || true
+
+                      # Every worker writes /tmp/results (summary.csv, detailed.json,
+                      # git_commit.txt), but only one publishes: concurrent writes to
+                      # one GCS object race and get rate-limited. The publisher is the
+                      # host of JAX process 0. Each host times its own first device,
+                      # and the device time of a collective depends on where the
+                      # device sits in the mesh, so the results have to come from the
+                      # same device on every run: process 0's first device is JAX
+                      # device 0, which is also the device a Pathways run times. Pod
+                      # indices do not follow JAX process indices. If the process
+                      # index cannot be read, worker 0 of slice 0 publishes.
+                      PROCESS_INDEX="$(python3 -c 'import json; print(json.load(open("/tmp/results/detailed.json"))[0]["metadata"]["platform_info"]["process_index"])' 2>/dev/null || true)"
+                      PUBLISH=false
+                      if [ -n "${PROCESS_INDEX:-}" ]; then
+                        if [ "${PROCESS_INDEX:-}" = "0" ]; then PUBLISH=true; fi
+                      elif [ "${JOB_COMPLETION_INDEX:-0}" = "0" ] && [ "${SLICE_INDEX:-0}" = "0" ]; then
+                        PUBLISH=true
+                      fi
+                      echo "JAX process index: ${PROCESS_INDEX:-unknown}; publishes results: ${PUBLISH:-false}"
+                      if [ "${PUBLISH:-false}" = "true" ]; then
                         tar czf /tmp/tpums_results.tar.gz -C /tmp results execution.log || true
                         gcloud storage cp /tmp/tpums_results.tar.gz "${GCS_OUTPUT_DIR}/" || true
                         gcloud storage cp /tmp/results/* "${GCS_OUTPUT_DIR}/"

@@ -135,10 +135,26 @@ class WorkloadSubmitterTest(parameterized.TestCase):
     self.assertEqual(
         pod_spec["containers"][0]["image"], "gcr.io/test/image:latest"
     )
-    # Only worker 0 uploads shared /tmp/results/* (and a failed summary.csv
-    # upload must fail the pod); every worker uploads execution_<index>.log.
+    # One slice, and no GLIBC_TUNABLES value, for a single-slice benchmark.
+    self.assertEqual(doc["spec"]["replicatedJobs"][0]["replicas"], 1)
+    env = {e["name"]: e for e in pod_spec["containers"][0]["env"]}
+    self.assertEqual(env["GLIBC_TUNABLES"]["value"], "")
+    self.assertEqual(
+        env["SLICE_INDEX"]["valueFrom"]["fieldRef"]["fieldPath"],
+        "metadata.labels['jobset.sigs.k8s.io/job-index']",
+    )
+    # Only the host of JAX process 0 uploads shared /tmp/results/* (and a
+    # failed summary.csv upload must fail the pod); if the process index is
+    # unknown, worker 0 of slice 0 does. Every worker uploads its own log.
     script = pod_spec["containers"][0]["args"][0]
-    self.assertIn('if [ "${JOB_COMPLETION_INDEX:-0}" = "0" ]; then', script)
+    self.assertIn('["platform_info"]["process_index"]', script)
+    self.assertIn('if [ "${PROCESS_INDEX:-}" = "0" ]; then PUBLISH=true; fi', script)
+    self.assertIn(
+        'elif [ "${JOB_COMPLETION_INDEX:-0}" = "0" ] && [ "${SLICE_INDEX:-0}" = "0" ];'
+        " then",
+        script,
+    )
+    self.assertIn('if [ "${PUBLISH:-false}" = "true" ]; then', script)
     self.assertIn(
         'gcloud storage cp /tmp/results/* "gs://test-bucket/daily/test/"\n',
         script,
@@ -146,11 +162,26 @@ class WorkloadSubmitterTest(parameterized.TestCase):
     self.assertNotIn(
         '/tmp/results/* "gs://test-bucket/daily/test/" || true', script
     )
+    self.assertIn('LOG_NAME="execution_${JOB_COMPLETION_INDEX:-0}.log"', script)
     self.assertIn(
-        '"gs://test-bucket/daily/test/execution_${JOB_COMPLETION_INDEX:-0}.log"',
+        'LOG_NAME="execution_s${SLICE_INDEX:-0}_${JOB_COMPLETION_INDEX:-0}.log"',
         script,
     )
-    self.assertNotIn('"gs://test-bucket/daily/test/execution.log"', script)
+    self.assertIn(
+        '"gs://test-bucket/daily/test/${LOG_NAME:-execution.log}"', script
+    )
+
+  def test_generate_jobset_manifest_multi_slice(self):
+    """A DCN benchmark gets one slice-job replica per slice."""
+    manifest_yaml, job_spec, pod_spec = _render_manifest(
+        "2x2x1", "configs/tpu7x/2x2x1/dcn_all_reduce.yaml", num_slices=2
+    )
+    doc = yaml.safe_load(manifest_yaml)
+    self.assertEqual(doc["spec"]["replicatedJobs"][0]["replicas"], 2)
+    # Hosts per slice are unchanged.
+    self.assertEqual(job_spec["parallelism"], 1)
+    env = {e["name"]: e for e in pod_spec["containers"][0]["env"]}
+    self.assertEqual(env["GLIBC_TUNABLES"]["value"], "glibc.pthread.rseq=0")
 
   @parameterized.named_parameters(
       ("tpu7x_single_host", "2x2x1", "tpu7x", 1, "tpu7x", None),
@@ -222,13 +253,26 @@ class WorkloadSubmitterTest(parameterized.TestCase):
         "2x2x1", "configs/tpu7x/2x2x1/gemm.yaml", **kwargs
     )
     env_vars = {
-        item["name"]: item["value"] for item in pod_spec["containers"][0]["env"]
+        item["name"]: item.get("value")
+        for item in pod_spec["containers"][0]["env"]
     }
     self.assertEqual(env_vars["GIT_BRANCH"], branch)
     self.assertNotIn("CONFIG_B64", manifest_yaml)
     self.assertIn(
         f'git clone --branch "{branch}" --single-branch', manifest_yaml
     )
+
+  @parameterized.named_parameters(
+      ("ici_collective", "configs/v5e/4x8/all_reduce.yaml", "all_reduce", 1),
+      ("compute", "configs/v5e/4x8/gemm.yaml", "gemm", 1),
+      ("dcn_all_reduce", "configs/v5e/4x8/dcn_all_reduce.yaml", "dcn_all_reduce", 2),
+      ("dcn_all_to_all", "configs/v5e/4x8/dcn_all_to_all.yaml", "dcn_all_to_all", 2),
+      ("unreadable", "configs/v5e/4x8/does_not_exist.yaml", "", 1),
+  )
+  def test_config_num_slices(self, config, benchmark_name, num_slices):
+    """Only `dcn_*` benchmarks get more than one slice."""
+    self.assertEqual(utils.config_benchmark_name(config), benchmark_name)
+    self.assertEqual(utils.config_num_slices(config), num_slices)
 
   def test_generate_jobset_manifest_missing_template_raises(self):
     with self.assertRaises(FileNotFoundError):

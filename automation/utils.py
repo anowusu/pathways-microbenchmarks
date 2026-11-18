@@ -23,6 +23,8 @@ import pathlib
 import re
 from typing import Any, Optional
 
+import yaml
+
 ENV_GIT_COMMIT = "git_commit"
 ENV_JAX_VERSION = "jax_version"
 ENV_LIBTPU_VERSION = "libtpu_version"
@@ -63,6 +65,16 @@ AUTOMATION_DIR = pathlib.Path(os.path.abspath(__file__)).parent
 PACKAGE_ROOT = AUTOMATION_DIR.parent
 _CONFIGS_ROOT = PACKAGE_ROOT / "configs"
 DEFAULT_TEMPLATE_PATH = str(AUTOMATION_DIR / "jobset_template.yaml")
+
+# Benchmarks registered as `dcn_*` run a collective between slices over the
+# data center network, so their JobSets need more than one slice; every other
+# benchmark runs within a single slice.
+DCN_BENCHMARK_PREFIX = "dcn_"
+DEFAULT_DCN_NUM_SLICES = int(os.environ.get("TPUMS_DCN_NUM_SLICES", "2"))
+# Multi-slice DCN benchmarks need GLIBC_TUNABLES=glibc.pthread.rseq=0 on
+# containers with glibc >= 2.35 (see op_flags.yaml). glibc reads the variable
+# at process start, so it has to be in the container environment.
+DCN_GLIBC_TUNABLES = "glibc.pthread.rseq=0"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -381,6 +393,40 @@ def compute_topology_info(
           else None
       ),
   }
+
+
+def config_benchmark_name(config_path: str) -> str:
+  """Returns the `benchmark.name` of a TPUMS config, or "" if it cannot be read.
+
+  Args:
+    config_path: Config path, absolute or relative to the package root.
+  """
+  path = pathlib.Path(config_path)
+  if not path.is_absolute():
+    path = PACKAGE_ROOT / path
+  try:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+  except (OSError, yaml.YAMLError):
+    return ""
+  benchmark = data.get("benchmark") if isinstance(data, dict) else None
+  if not isinstance(benchmark, dict):
+    return ""
+  return str(benchmark.get("name") or "")
+
+
+def config_num_slices(config_path: str) -> int:
+  """Returns how many slices the JobSet of `config_path` needs.
+
+  `dcn_*` benchmarks run a collective between slices, so they get
+  `DEFAULT_DCN_NUM_SLICES` slices of the config's topology (2 unless
+  `TPUMS_DCN_NUM_SLICES` says otherwise); every other benchmark gets one.
+
+  Args:
+    config_path: Config path, absolute or relative to the package root.
+  """
+  if config_benchmark_name(config_path).startswith(DCN_BENCHMARK_PREFIX):
+    return DEFAULT_DCN_NUM_SLICES
+  return 1
 
 
 def normalize_topologies(

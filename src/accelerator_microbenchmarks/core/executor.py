@@ -217,6 +217,13 @@ class BaseRunExecutor:
 
   def _load_trace(self, trace_dir: str) -> Optional[profiler.XprofTrace]:
     """Loads the XProf trace in `trace_dir` once for per-device parsing."""
+    # `is True`: test doubles of a benchmark answer any attribute.
+    if getattr(self.benchmark, "xprof_module_span_fallback", False) is True:
+      return profiler.load_xprof_trace(
+          trace_dir,
+          self.benchmark.match_xprof_op_fallback,
+          module_span_fallback=True,
+      )
     return profiler.load_xprof_trace(
         trace_dir, self.benchmark.match_xprof_op_fallback
     )

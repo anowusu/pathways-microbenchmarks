@@ -620,6 +620,136 @@ class ProfilerTest(absltest.TestCase):
       json.dump({"traceEvents": events}, f)
     return trace_dir
 
+  def test_derived_line_events_do_not_mix_time_bases(self):
+    """A step is timed from the device clock alone when both clocks appear.
+
+    Mirrors the device plane of a trace converted from a Pathways worker's
+    XSpace (TPU v5e, HBM benchmark): the `XLA Ops` event has on-device
+    timestamps, and the `Framework Name Scope` line repeats it under the
+    MARKER name with `ts`/`dur` only. The trace clock runs 6.8 us ahead of
+    the device clock here; spanning both events would report 823.0 us.
+    """
+
+    def device_args(offset_us, dur_us):
+      return {
+          "device_offset_ps": offset_us * 1e6,
+          "device_duration_ps": dur_us * 1e6,
+      }
+
+    def thread(tid, name):
+      return {
+          "ph": "M",
+          "pid": 1,
+          "tid": tid,
+          "name": "thread_name",
+          "args": {"name": name},
+      }
+
+    trace = profiler.load_xprof_trace(
+        self._write_trace([
+            {"pid": 1, "name": "process_name", "args": {"name": "/device:TPU:0"}},
+            thread(10, "XLA Modules"),
+            thread(11, "XLA Ops"),
+            thread(12, "Framework Name Scope"),
+            {
+                "ph": "X", "pid": 1, "tid": 10, "name": "jit_hbm_op(1)",
+                "ts": 1006.8, "dur": 816.2, "args": device_args(1000.0, 816.2),
+            },
+            {
+                "ph": "X", "pid": 1, "tid": 11, "name": "broadcast_add_fusion",
+                "ts": 1006.8, "dur": 816.2,
+                "args": {
+                    "tf_op": f"jit(hbm_op)/{profiler.MARKER}/add",
+                    **device_args(1000.0, 816.2),
+                },
+            },
+            {
+                "ph": "X", "pid": 1, "tid": 12, "name": profiler.MARKER,
+                "ts": 1006.8, "dur": 816.2,
+            },
+        ])
+    )
+    (duration_ms,) = trace.device_step_durations_ms(0)
+    self.assertAlmostEqual(duration_ms, 0.8162, places=6)
+
+  def test_module_span_fallback_times_steps_by_module_execution(self):
+    """Without MARKER events, each step is its XLA module execution.
+
+    Mirrors a DCN all-reduce trace: the cross-slice lowering (`send`, `recv`,
+    `send-done`, `recv-done`) carries no MARKER scope.
+    """
+
+    def thread(pid, tid, name):
+      return {
+          "ph": "M",
+          "pid": pid,
+          "tid": tid,
+          "name": "thread_name",
+          "args": {"name": name},
+      }
+
+    def event(pid, tid, name, ts, dur):
+      return {
+          "ph": "X",
+          "pid": pid,
+          "tid": tid,
+          "name": name,
+          "ts": ts,
+          "dur": dur,
+      }
+
+    events = [
+        {"pid": 1, "name": "process_name", "args": {"name": "/device:TPU:0"}},
+        {"pid": 2, "name": "process_name", "args": {"name": "/device:TPU:1"}},
+        {"pid": 9, "name": "process_name", "args": {"name": "/host:CPU"}},
+        thread(1, 10, "XLA Modules"),
+        thread(1, 11, "XLA Ops"),
+        thread(2, 20, "XLA Modules"),
+        thread(2, 21, "XLA Ops"),
+        # Two steps on each device; device 1 is slower.
+        event(1, 10, "jit_all_reduce(1)", 1000, 80_000),
+        event(1, 11, "send", 1010, 500),
+        event(1, 11, "recv-done", 60_000, 20_000),
+        event(1, 10, "jit_all_reduce(1)", 200_000, 82_000),
+        event(1, 11, "send", 200_010, 500),
+        event(2, 20, "jit_all_reduce(1)", 1000, 90_000),
+        event(2, 21, "send", 1010, 500),
+        event(2, 20, "jit_all_reduce(1)", 200_000, 91_000),
+        # A host event of the same name is not a module execution.
+        event(9, 90, "jit_all_reduce", 900, 100_000),
+    ]
+    trace_dir = self._write_trace(events)
+
+    # Without the fallback there is nothing to time.
+    self.assertIsNone(profiler.load_xprof_trace(trace_dir))
+
+    trace = profiler.load_xprof_trace(trace_dir, module_span_fallback=True)
+    self.assertIsNotNone(trace)
+    self.assertEqual(trace.device_step_durations_ms(0), [80.0, 82.0])
+    self.assertEqual(trace.device_step_durations_ms(1), [90.0, 91.0])
+    # No /device:TPU:5 plane: falls back to /host:CPU, which has no module
+    # executions, rather than borrowing another device's.
+    self.assertEqual(trace.device_step_durations_ms(5), [])
+
+  def test_module_span_fallback_is_unused_when_marker_events_exist(self):
+    """MARKER events keep priority over the module-span fallback."""
+    trace = profiler.load_xprof_trace(
+        self._write_trace([
+            {"pid": 1, "name": "process_name", "args": {"name": "/device:TPU:0"}},
+            {
+                "ph": "M",
+                "pid": 1,
+                "tid": 10,
+                "name": "thread_name",
+                "args": {"name": "XLA Modules"},
+            },
+            {"pid": 1, "tid": 10, "name": "jit_step(1)", "ts": 0, "dur": 1000},
+            {"pid": 1, "tid": 11, "name": f"{profiler.MARKER}_op", "ts": 100, "dur": 300},
+        ]),
+        module_span_fallback=True,
+    )
+    self.assertEqual(trace.device_step_durations_ms(0), [0.3])
+
   def test_equal_start_step_spans_keep_trace_order(self):
     """Verifies `jit_` steps with equal start times keep their trace order."""
     trace = profiler.load_xprof_trace(

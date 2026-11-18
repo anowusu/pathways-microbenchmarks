@@ -210,6 +210,36 @@ def _extract_candidate_events(
   return candidates
 
 
+def _extract_module_events(events: list[TraceEvent]) -> list[TraceEvent]:
+  """Returns the `jit_*` module executions of every `XLA Modules` line.
+
+  These are the events `_get_step_spans_by_pid` turns into step spans for
+  device pids, so timing a step by them yields the duration of the whole
+  module execution on the device.
+
+  Args:
+    events: All trace events.
+  """
+  module_threads = _get_module_threads(events)
+  return [
+      e
+      for e in events
+      if (e.get("pid"), e.get("tid")) in module_threads
+      and e.get("name", "").startswith("jit_")
+      and "ts" in e
+      and "dur" in e
+  ]
+
+
+def _has_device_timestamps(event: TraceEvent) -> bool:
+  """Whether `event` carries both on-device timestamp fields."""
+  args = event.get("args", {})
+  return (
+      args.get("device_offset_ps") is not None
+      and args.get("device_duration_ps") is not None
+  )
+
+
 def _event_span_us(event: TraceEvent) -> tuple[float, float]:
   """Returns (start_us, duration_us), preferring on-device timestamps.
 
@@ -217,11 +247,12 @@ def _event_span_us(event: TraceEvent) -> tuple[float, float]:
   from the on-chip cycle counter; host events carry neither. Both fields are
   required together so start and duration always share one time base.
   """
-  args = event.get("args", {})
-  offset_ps = args.get("device_offset_ps")
-  duration_ps = args.get("device_duration_ps")
-  if offset_ps is not None and duration_ps is not None:
-    return float(offset_ps) / 1e6, float(duration_ps) / 1e6
+  if _has_device_timestamps(event):
+    args = event["args"]
+    return (
+        float(args["device_offset_ps"]) / 1e6,
+        float(args["device_duration_ps"]) / 1e6,
+    )
   return float(event["ts"]), float(event["dur"])
 
 
@@ -265,11 +296,22 @@ def _calculate_step_durations_ms(
   # 2. PRIMARY: Span from earliest start to latest end within each enclosure.
   durations_ms = []
   for c_start, c_end in step_spans:
-    in_step = [
-        span
-        for span in map(_event_span_us, target_events)
-        if c_start <= span[0] <= c_end
+    in_step_events = [
+        e for e in target_events if c_start <= _event_span_us(e)[0] <= c_end
     ]
+    # A device plane can repeat a timed op on derived lines (e.g. the
+    # `Framework Name Scope` line of a trace converted from a Pathways worker's
+    # XSpace), under the op's scope name but without its on-device timestamps.
+    # Their trace-clock `ts` is a few microseconds off the device-clock offset
+    # of the op itself, so spanning both stretches the step by that offset.
+    # When some of the step's events have on-device timestamps, time the step
+    # from those alone.
+    device_clock_events = [
+        e for e in in_step_events if _has_device_timestamps(e)
+    ]
+    if device_clock_events:
+      in_step_events = device_clock_events
+    in_step = [_event_span_us(e) for e in in_step_events]
     if in_step:
       s_start = min(start for start, _ in in_step)
       s_end = max(start + dur for start, dur in in_step)
@@ -350,19 +392,23 @@ def _get_step_spans_by_pid(
 def load_xprof_trace(
     xprof_dir: str,
     is_xprof_op_fn: Optional[Callable[[TraceEvent], bool]] = None,
+    module_span_fallback: bool = False,
 ) -> XprofTrace | None:
   """Stage 1 (once per trace): loads an XProf trace and indexes it per device.
 
   1. Load and decompress the .json.gz trace file.
   2. Pick the timing events across the whole trace, in order: MARKER
      'call-done' events, else MARKER events excluding '-start', else custom
-     XProf ops. The choice is made for all pids together.
+     XProf ops, else (with `module_span_fallback`) the `jit_*` module
+     executions themselves. The choice is made for all pids together.
   3. Index the timing events, `jit_*` step spans, and `process_name` metadata
      per pid, so stage 2 never rescans the trace.
 
   Args:
     xprof_dir: Directory containing the XProf trace.
     is_xprof_op_fn: Custom XProf op matcher used when no MARKER events exist.
+    module_span_fallback: Whether to time each step by its whole XLA module
+      execution when no MARKER event and no custom XProf op is found.
 
   Returns:
     The indexed trace, or None if no trace file or no timing events are found.
@@ -375,6 +421,12 @@ def load_xprof_trace(
 
   # 2. Extract candidate timing events (markers -> custom ops)
   candidate_events = _extract_candidate_events(events, is_xprof_op_fn)
+  if not candidate_events and module_span_fallback:
+    candidate_events = _extract_module_events(events)
+    print(
+        f"No '{MARKER}' or custom XProf op events found; timing each step by"
+        f" its XLA module execution ({len(candidate_events)} module events)."
+    )
   if not candidate_events:
     print(f"Warning: No valid timing events found in {xprof_dir}")
     return None

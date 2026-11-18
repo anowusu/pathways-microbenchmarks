@@ -461,6 +461,11 @@ class BaseBenchmark(Generic[TConfig], abc.ABC):
   # opt out by setting this to False, which allows them to run under
   # `standalone_host_init` (no SliceBuilder, hence no ICI).
   requires_ici: bool = True
+  # Whether XProf timing falls back to the duration of each XLA module
+  # execution (the `jit_*` event of the device's `XLA Modules` line) when the
+  # trace has neither MARKER events nor `match_xprof_op_fallback` matches. Only
+  # for benchmarks whose jitted function is nothing but the measured op.
+  xprof_module_span_fallback: bool = False
 
   def __init_subclass__(cls, **kwargs):
     super().__init_subclass__(**kwargs)

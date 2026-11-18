@@ -7,10 +7,17 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+from accelerator_microbenchmarks.benchmarks import benchmark_loader
 from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import config
 from accelerator_microbenchmarks.core import constants
 from accelerator_microbenchmarks.core import csv_loader
+from accelerator_microbenchmarks.core import registry
+
+
+# Config path prefixes (relative to `configs/`) excluded from the generic config
+# checks below.
+_EXCLUDED_CONFIG_PREFIXES: tuple[str, ...] = ()
 
 
 def _find_all_benchmark_configs() -> list[tuple[str, str]]:
@@ -28,6 +35,8 @@ def _find_all_benchmark_configs() -> list[tuple[str, str]]:
         continue
       full_path = os.path.join(root, f)
       rel_path = os.path.relpath(full_path, configs_dir)
+      if rel_path.replace(os.sep, "/").startswith(_EXCLUDED_CONFIG_PREFIXES):
+        continue
       test_name = rel_path.translate(
           str.maketrans(dict.fromkeys(f"{os.sep}.-", "_"))
       )
@@ -37,6 +46,11 @@ def _find_all_benchmark_configs() -> list[tuple[str, str]]:
 
 class ConfigTest(parameterized.TestCase):
   """Unit tests for config.py."""
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    benchmark_loader.load_all_benchmarks()
 
   def setUp(self):
     super().setUp()
@@ -501,6 +515,9 @@ benchmark:
         "xprof_device_timing_aggregation",
     )
     self.assertEqual(
+        config.BenchmarkKey.STANDALONE_HOST_INIT, "standalone_host_init"
+    )
+    self.assertEqual(
         {k.value for k in config.BenchmarkKey},
         {
             "name",
@@ -511,6 +528,7 @@ benchmark:
             "sweep",
             "xprof_timing",
             "xprof_device_timing_aggregation",
+            "standalone_host_init",
         },
     )
 
@@ -654,6 +672,76 @@ benchmark:
     self.assertIn("Expected 'xprof_timing' in benchmark", str(ctx.exception))
     self.assertIn("to be a bool", str(ctx.exception))
 
+  @parameterized.named_parameters(
+      ("true", "benchmark:\n  name: gemm\n  standalone_host_init: true\n", True),
+      (
+          "false",
+          "benchmark:\n  name: gemm\n  standalone_host_init: false\n",
+          False,
+      ),
+      ("omitted", "benchmark:\n  name: gemm\n", None),
+  )
+  def test_load_config_benchmark_level_standalone_host_init_extracted(
+      self, yaml_content, expected
+  ):
+    """Verifies `benchmark:`-level standalone_host_init lands in base params."""
+    config_path = os.path.join(self.test_dir.name, "config_standalone_host.yaml")
+    with open(config_path, "w", encoding="utf-8") as f:
+      f.write(yaml_content)
+    expanded = config.load_config(config_path)
+    self.assertNotEmpty(expanded)
+    self.assertEqual(expanded[0].get("standalone_host_init"), expected)
+
+  @parameterized.named_parameters(
+      ("in_params", "params:\n  standalone_host_init: true\n"),
+      ("in_sweep", "sweep:\n  standalone_host_init: [true, false]\n"),
+  )
+  def test_load_config_standalone_host_init_reserved_key_raises_error(
+      self, snippet
+  ):
+    """Verifies reserved key standalone_host_init in config sections raises."""
+    yaml_content = "benchmark:\n  name: gemm\n" + "".join(
+        f"  {line}\n" for line in snippet.splitlines()
+    )
+    config_path = os.path.join(
+        self.test_dir.name, "config_reserved_standalone_host.yaml"
+    )
+    with open(config_path, "w", encoding="utf-8") as f:
+      f.write(yaml_content)
+
+    with self.assertRaises(ValueError) as ctx:
+      config.load_config(config_path)
+    self.assertIn("reserved key(s)", str(ctx.exception))
+    self.assertIn("standalone_host_init", str(ctx.exception))
+
+  @parameterized.named_parameters(
+      ("string_true", '"true"'),
+      ("integer", "1"),
+  )
+  def test_load_config_standalone_host_init_non_bool_raises_error(
+      self, value
+  ):
+    """Verifies non-bool `benchmark:`-level standalone_host_init raises."""
+    yaml_content = f"""
+benchmark:
+  name: gemm
+  standalone_host_init: {value}
+  params:
+    m: 1024
+"""
+    config_path = os.path.join(
+        self.test_dir.name, "config_invalid_standalone_host.yaml"
+    )
+    with open(config_path, "w", encoding="utf-8") as f:
+      f.write(yaml_content)
+
+    with self.assertRaises(ValueError) as ctx:
+      config.load_config(config_path)
+    self.assertIn(
+        "Expected 'standalone_host_init' in benchmark", str(ctx.exception)
+    )
+    self.assertIn("to be a bool", str(ctx.exception))
+
   @parameterized.named_parameters(_find_all_benchmark_configs())
   def test_all_configs_load_successfully(self, config_path):
     """Verifies that every YAML config loads and expands successfully."""
@@ -674,9 +762,20 @@ benchmark:
         csv_loader, "load_cases_from_csv", side_effect=_load_csv_for_test
     ):
       expanded = config.load_config(config_path)
+    parts = config_path.split(os.sep)
+    is_nested_sample_config = (
+        "sample_configs" in parts and parts[-2] != "sample_configs"
+    )
     self.assertNotEmpty(expanded)
     for item in expanded:
       self.assertIn("name", item)
+      if not is_nested_sample_config:
+        params = dict(item)
+        name = params.pop("name")
+        params.pop("xprof_timing", None)
+        params.pop("xprof_device_timing_aggregation", None)
+        bench_cls = registry.benchmark_registry.get_benchmark(name)
+        bench_cls.Config(**params)
 
   @parameterized.named_parameters(
       (
@@ -731,7 +830,7 @@ benchmark:
       config.load_config(config_path)
 
   def test_soaking_execution_params_mixin_validation(self):
-    """Verifies min_duration_s validation and samples_per_run defaults."""
+    """Verifies soaking mixin defaults, pulse-field isolation, and bounds."""
 
     @dataclasses.dataclass
     class DummySoakParams(
@@ -742,6 +841,11 @@ benchmark:
     default_cfg = DummySoakParams(min_duration_s=120.0)
     self.assertEqual(default_cfg.min_duration_s, 120.0)
     self.assertEqual(default_cfg.samples_per_run, 25)
+    soak_fields = {f.name for f in dataclasses.fields(DummySoakParams)}
+    self.assertNotIn("num_cycles", soak_fields)
+    self.assertNotIn("idle_s", soak_fields)
+    self.assertNotIn("num_cycles", dataclasses.asdict(default_cfg))
+    self.assertNotIn("idle_s", dataclasses.asdict(default_cfg))
 
     valid_cfg = DummySoakParams(samples_per_run=10, min_duration_s=60.0)
     self.assertEqual(valid_cfg.samples_per_run, 10)
@@ -759,6 +863,36 @@ benchmark:
 
     with self.assertRaisesRegex(ValueError, "samples_per_run must be >= 1"):
       DummySoakParams(min_duration_s=10.0, samples_per_run=0)
+
+  def test_pulse_execution_params_mixin_validation(self):
+    """Verifies pulse mixin defaults, field isolation, and bounds."""
+
+    @dataclasses.dataclass
+    class DummyPulseParams(
+        config.PulseExecutionParamsMixin, base.BaseBenchmarkParams
+    ):
+      pass
+
+    pulse_default = DummyPulseParams()
+    self.assertEqual(pulse_default.num_cycles, 10)
+    self.assertEqual(pulse_default.idle_s, 0.05)
+    self.assertEqual(pulse_default.min_duration_s, 0.0)
+    pulse_fields = {f.name for f in dataclasses.fields(DummyPulseParams)}
+    self.assertNotIn("samples_per_run", pulse_fields)
+    self.assertNotIn("samples_per_run", dataclasses.asdict(pulse_default))
+
+    two_cycles_with_soak = DummyPulseParams(num_cycles=2, min_duration_s=5.0)
+    self.assertEqual(two_cycles_with_soak.num_cycles, 2)
+    self.assertEqual(two_cycles_with_soak.min_duration_s, 5.0)
+
+    with self.assertRaisesRegex(ValueError, "num_cycles must be >= 2"):
+      DummyPulseParams(num_cycles=1, min_duration_s=0.0)
+
+    with self.assertRaisesRegex(ValueError, "num_cycles must be >= 2"):
+      DummyPulseParams(min_duration_s=10.0, num_cycles=1)
+
+    with self.assertRaisesRegex(ValueError, "idle_s must be >= 0.0"):
+      DummyPulseParams(min_duration_s=10.0, idle_s=-0.1)
 
   def test_collective_configs_xprof_device_timing_aggregation(self):
     """Verifies collective configs set global_slowest_per_step on multi-host and None on single-host."""

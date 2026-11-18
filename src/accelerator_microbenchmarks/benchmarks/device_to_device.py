@@ -5,6 +5,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import dtypes
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import report
 from accelerator_microbenchmarks.core import system
@@ -24,6 +25,9 @@ class TransferDirection(constants.ParamEnum):
 @dataclasses.dataclass
 class DeviceToDeviceParams(base.SingleDtypeBenchmarkParams):
   """YAML / CLI configuration specification (NO src/dst fields)."""
+
+  # generate_inputs() sizes the payload with itemsize bytes per element.
+  ALLOW_SUB_BYTE_DTYPES = False
 
   data_size_mib: int = dataclasses.field(
       default=1024,
@@ -187,7 +191,7 @@ class DeviceToDeviceBenchmark(base.BaseBenchmark[DeviceToDeviceTestCaseParams]):
 
     num_devices = len(jax.devices())
     size_bytes = int(self.config.data_size_bytes)
-    dtype = utils.parse_dtype(self.config.dtype)
+    dtype = dtypes.parse_dtype(self.config.dtype)
     itemsize = jnp.dtype(dtype).itemsize
 
     num_elements = size_bytes // itemsize
@@ -199,7 +203,7 @@ class DeviceToDeviceBenchmark(base.BaseBenchmark[DeviceToDeviceTestCaseParams]):
     key = jax.random.PRNGKey(self.config.seed)
 
     generate_data = jax.jit(
-        lambda k: jax.random.normal(k, shape, dtype=dtype),
+        lambda k: utils.random_normal_array(k, shape, dtype),
         out_shardings=sharding,
     )
     data = generate_data(key)

@@ -14,6 +14,7 @@ from accelerator_microbenchmarks.core import constants
 from accelerator_microbenchmarks.core import platform
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import report
+from accelerator_microbenchmarks.core import standalone_host
 from accelerator_microbenchmarks.core import system
 import jax
 import yaml
@@ -24,6 +25,8 @@ _REPO_ROOT = "third_party/py/accelerator_microbenchmarks"
 def get_op_flags_and_env(
     benchmark_configs: List[dict[str, Any]],
     xla_flags_file_path: str | None = None,
+    *,
+    generation: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
   """Resolves op_flags.yaml for benchmark configs and returns (flags_list, env_dict)."""
   benchmark_sets = set([conf["name"] for conf in benchmark_configs])
@@ -38,6 +41,10 @@ def get_op_flags_and_env(
   flags_list: list[str] = []
   env_dict: dict[str, str] = {}
   op_flags = None
+
+  if xla_flags_file_path is not None:
+    if not os.path.exists(xla_flags_file_path):
+      raise FileNotFoundError(f"Path not found: '{xla_flags_file_path}'")
 
   try:
     if xla_flags_file_path is None:
@@ -67,6 +74,7 @@ def get_op_flags_and_env(
         f"Invalid format in '{xla_flags_file_path}': expected a dict, got"
         f" {type(op_flags).__name__}."
     )
+
   if benchmark_name in op_flags:
     flags_config = op_flags[benchmark_name]
     if not isinstance(flags_config, dict):
@@ -104,11 +112,20 @@ def get_op_flags_and_env(
 def set_xla_flags(
     benchmark_configs: List[dict[str, Any]],
     xla_flags_file_path: str | None = None,
+    *,
+    generation: str | None = None,
 ):
   """Set env vars based on first benchmark in config and op_flags.yaml."""
-  flags_list, env_dict = get_op_flags_and_env(
-      benchmark_configs, xla_flags_file_path=xla_flags_file_path
-  )
+  if generation is not None:
+    flags_list, env_dict = get_op_flags_and_env(
+        benchmark_configs,
+        xla_flags_file_path=xla_flags_file_path,
+        generation=generation,
+    )
+  else:
+    flags_list, env_dict = get_op_flags_and_env(
+        benchmark_configs, xla_flags_file_path=xla_flags_file_path
+    )
   if flags_list:
     os.environ["LIBTPU_INIT_ARGS"] = " ".join(flags_list)
     print(f"Set LIBTPU_INIT_ARGS: {os.environ['LIBTPU_INIT_ARGS']}")
@@ -122,13 +139,20 @@ def set_xla_flags(
   )
 
 
-def init_jax_distributed():
-  """Ensures JAX distributed coordinator is initialized."""
-  print("Initializing JAX distributed system...")
-  try:
-    jax.distributed.initialize()
-  except Exception as e:
-    print(f"Note: jax.distributed.initialize() failed or not needed: {e}")
+def init_jax_distributed(distributed: bool = True):
+  """Initializes the JAX backend, and the distributed coordinator if `distributed`.
+
+  `standalone_host_init` runs this host as the only participant, so the
+  coordinator is not started in that mode.
+  """
+  if distributed:
+    print("Initializing JAX distributed system...")
+    try:
+      jax.distributed.initialize()
+    except Exception as e:
+      print(f"Note: jax.distributed.initialize() failed or not needed: {e}")
+  else:
+    print("Skipping JAX distributed initialization (standalone_host_init).")
   try:
     devices = jax.devices()
     print(f"JAX devices: {len(devices)} (e.g. {devices[:4]}...)")
@@ -147,6 +171,8 @@ def run_benchmarks(
     xprof_device_timing_aggregation: str = (
         constants.XprofDeviceTimingAggregation.MEASURED_DEVICE_OR_FIRST
     ),
+    standalone_host_init: bool = False,
+    tpu_version: Optional[str] = None,
 ) -> List[base.BenchmarkResult]:
   """Core execution engine for typed benchmark task configurations."""
   xprof_config = base.XprofConfig(
@@ -156,18 +182,58 @@ def run_benchmarks(
   )
 
   benchmark_loader.load_all_benchmarks()
-
-  # 1. Set Env Vars from op_flags.yaml
-  set_xla_flags(
-      [{"name": task_name} for task_name, _ in tasks],
-      xla_flags_file_path=xla_flags_file_path,
+  requested_tpu_version = (
+      system.TpuVersion.from_device_kind(tpu_version)
+      if tpu_version is not None
+      else None
   )
 
+  # 1. Set Env Vars from op_flags.yaml
+  inferred_gen = None
+  if inferred_gen is not None:
+    set_xla_flags(
+        [{"name": task_name} for task_name, _ in tasks],
+        xla_flags_file_path=xla_flags_file_path,
+        generation=inferred_gen,
+    )
+  else:
+    set_xla_flags(
+        [{"name": task_name} for task_name, _ in tasks],
+        xla_flags_file_path=xla_flags_file_path,
+    )
+  # Optional standalone single-host init. Must follow set_xla_flags (which
+  # replaces LIBTPU_INIT_ARGS) and precede any JAX device call.
+  if standalone_host_init:
+    # Without SliceBuilder neither intra- nor inter-host ICI links are
+    # configured, so benchmarks that need ICI would hang or fail: reject them
+    # up front via each benchmark's `requires_ici` attribute.
+    unsupported = sorted({
+        name
+        for name, _ in tasks
+        if registry.benchmark_registry.get_benchmark(name).requires_ici
+    })
+    if unsupported:
+      raise ValueError(
+          f"standalone_host_init is not supported for {unsupported}: this mode"
+          " initializes the host without SliceBuilder and provides no"
+          " inter-device (ICI) communication. Only benchmarks that do not"
+          " require ICI (requires_ici = False) can run in this mode."
+      )
+    standalone_host.configure_standalone_host()
+
   # 2. Ensure JAX is initialized
-  init_jax_distributed()
+  init_jax_distributed(distributed=not standalone_host_init)
 
   # 3. Detect Platform and Resolve HardwareSpec
   platform_info = platform.get_platform_info()
+  if (
+      requested_tpu_version is not None
+      and platform_info.tpu_type != requested_tpu_version
+  ):
+    raise ValueError(
+        f"Detected TPU generation '{platform_info.tpu_type}' does not match"
+        f" --tpu_version='{tpu_version}'."
+    )
   resolved_hardware_spec = system.get_hardware_spec(platform_info.tpu_type)
 
   all_results: List[base.BenchmarkResult] = []
@@ -175,7 +241,15 @@ def run_benchmarks(
     print(f"\n>>> Running Benchmark: {task_name} with {config_obj}")
 
     try:
-      benchmark_cls = registry.benchmark_registry.get_benchmark(task_name)
+      gen_str = str(platform_info.tpu_type)
+      benchmark_cls = registry.benchmark_registry.get_benchmark(
+          task_name, generation=gen_str
+      )
+      param_defaults = registry.benchmark_registry.get_param_defaults(
+          task_name, generation=gen_str
+      )
+      if param_defaults:
+        config_obj = config_obj.with_generation_defaults(param_defaults)
 
       test_case_configs = config_obj.expand_test_cases()
       total_cases = len(test_case_configs)

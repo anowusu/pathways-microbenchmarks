@@ -20,6 +20,7 @@ class BenchmarkKey(str, enum.Enum):
   SWEEP = "sweep"
   XPROF_TIMING = "xprof_timing"
   XPROF_DEVICE_TIMING_AGGREGATION = "xprof_device_timing_aggregation"
+  STANDALONE_HOST_INIT = "standalone_host_init"
 
 
 _ALLOWED_BENCHMARK_KEYS = frozenset(BenchmarkKey)
@@ -304,6 +305,16 @@ def load_config(path: str) -> list[dict[str, Any]]:
         xprof_device_timing_aggregation
     )
 
+  standalone_host_init = benchmark_spec.get(BenchmarkKey.STANDALONE_HOST_INIT)
+  if standalone_host_init is not None:
+    if not isinstance(standalone_host_init, bool):
+      raise ValueError(
+          f"Expected '{BenchmarkKey.STANDALONE_HOST_INIT.value}' in benchmark"
+          f" '{benchmark_name}' to be a bool, but got"
+          f" {type(standalone_host_init).__name__}."
+      )
+    base_params["standalone_host_init"] = standalone_host_init
+
   # Stage 3: Cases (per-case parameter overrides over base_params)
   case_dicts = (
       [{**base_params, **case} for case in cases_list]
@@ -332,8 +343,8 @@ class SoakingExecutionParamsMixin:
           "help": (
               "Number of back-to-back iterations dispatched per window before"
               " host `jax.block_until_ready` synchronization across Warmup,"
-              " Phase 1 (`baseline_window`), Phase 2 (`min_duration_s` soak),"
-              " and Phase 3 (`worst_window`)."
+              " Phase 1 (`pre_soaking_window`), Phase 2 (`min_duration_s`"
+              " soak), and Phase 3 (`post_soaking_window`)."
           ),
       },
   )
@@ -342,3 +353,27 @@ class SoakingExecutionParamsMixin:
     super().__post_init__()  # pyrefly: ignore[missing-attribute]
     if self.min_duration_s <= 0.0:  # pyrefly: ignore[missing-attribute]
       raise ValueError("min_duration_s must be > 0.0 for soaking benchmarks.")
+
+
+@dataclasses.dataclass
+class PulseExecutionParamsMixin:
+  """Mixin for multi-cycle load-pulsing benchmark parameters."""
+
+  num_cycles: int = dataclasses.field(
+      default=10,
+      metadata={
+          "min": 2,
+          "help": (
+              "Minimum number of active load cycles separated by idle_s"
+              " host-side pauses (including pre_soaking_window and"
+              " post_soaking_window)."
+          ),
+      },
+  )
+  idle_s: float = dataclasses.field(
+      default=0.05,
+      metadata={
+          "min": 0.0,
+          "help": "Idle pause duration in seconds between active load cycles.",
+      },
+  )

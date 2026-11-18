@@ -123,7 +123,7 @@ rebuild; only driver-side changes (`automation/*.py`) need a new image.
 ```bash
 source ~/tpums_launcher_venv/bin/activate      # kubernetes, pathwaysutils, google-cloud-bigquery
 export KUBECONFIG=~/.kube/tpums-pathways-pw-scale-test-v5e-32.yaml
-PYTHONPATH=.:src python -m automation.nightly_runner \
+PYTHONPATH=.:src python -m automation.suite_runner \
   --cluster pw-scale-test-v5e-32 --project cloud-tpu-multipod-dev \
   --region us-south1 --zone us-south1-a --namespace default \
   --queue multislice-queue --priority "" --pod-priority-class medium \

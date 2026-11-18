@@ -11,19 +11,6 @@ gemm_flags: &gemm_flags
     - "--xla_tpu_vmem_scavenging_mode=NONE"
     - "--xla_tpu_dvfs_p_state=7"
 
-gemm_numerics_flags: &gemm_numerics_flags
-  flags:
-    - "--xla_tpu_enable_async_collective_fusion=false"
-    - "--xla_tpu_enable_async_collective_fusion_multiple_steps=true"
-    - "--xla_tpu_overlap_compute_collective_tc=true"
-    - "--xla_enable_async_all_gather=true"
-    - "--xla_enable_async_collective_permute=true"
-    - "--xla_tpu_enable_all_experimental_scheduler_features=true"
-    - "--xla_tpu_accumulate_into_mrb=true"
-    - "--xla_tpu_scoped_vmem_limit_kib=65536"
-    - "--xla_tpu_allow_conv_input_fusion_with_downcast_convert=true"
-    - "--xla_tpu_dvfs_p_state=7"
-
 all_reduce:
   flags:
     - "--xla_jf_debug_level=3"
@@ -39,12 +26,15 @@ all_reduce:
 
 dcn_all_reduce:
   flags:
-    - "--xla_tpu_use_enhanced_launch_barrier=true"
+    - "--xla_tpu_use_enhanced_launch_barrier=false"
     - "--xla_tpu_prefer_async_allgather_to_allreduce=true"
     - "--xla_tpu_data_parallel_opt_different_sized_ops=true"
     - "--xla_tpu_enable_data_parallel_all_reduce_opt=true"
     - "--megascale_max_reduction_shard_size=16777216"
     - "--xla_tpu_use_megascale_host_reduction=false"
+    - "--megascale_grpc_premap_memory_bytes=137438953472"
+  env:
+    GLIBC_TUNABLES: "glibc.pthread.rseq=0"
 
 reduce_scatter:
   flags:
@@ -80,6 +70,20 @@ all_to_all:
     - "--xla_jf_debug_level=3"
     - "--xla_tpu_dvfs_p_state=7"
 
+# Note: On containers with glibc >= 2.35 (e.g., Ubuntu 22.04+), launch multi-slice
+# DCN benchmarks with `GLIBC_TUNABLES=glibc.pthread.rseq=0` in the process/container
+# environment. glibc reads GLIBC_TUNABLES at process start before Python runs, so
+# it cannot be applied via an in-process `env:` entry here.
+dcn_all_to_all:
+  flags:
+    - "--xla_tpu_use_enhanced_launch_barrier=true"
+    - "--xla_tpu_enable_async_all_to_all=true"
+    - "--megascale_max_reduction_shard_size=8388608"
+    - "--megascale_grpc_premap_memory_bytes=68719476736"
+    - "--megascale_grpc_dynamic_lb_max_outstanding_bytes=67108864"
+    - "--megascale_grpc_enable_xor_tracer=false"
+    - "--megascale_grpc_enable_numa_aware_transmit=false"
+
 host_device: &host_device
   flags:
     - "--xla_tpu_dvfs_p_state=7"
@@ -90,7 +94,6 @@ host_device: &host_device
 device_to_device:
   flags:
     - "--xla_tpu_collect_sflag_wait_stats_trace=true"
-    - "--xla_tpu_force_global_barriers=true"
     - "--xla_tpu_dvfs_p_state=7"
 
 hbm:
@@ -106,11 +109,13 @@ tokamax_splash_attention:
     - "--xla_tpu_dvfs_p_state=7"
 
 gemm: *gemm_flags
+gemm_quantized: *gemm_flags
 gemm_throttling: *gemm_flags
+gemm_pulse: *gemm_flags
 gemm_chained: *gemm_flags
 
 quantization: *gemm_flags
-transpose_quantization: *gemm_flags
+quantize_transpose: *gemm_flags
 quantization_static_scaling: *gemm_flags
 transpose_quantization_static_scaling: *gemm_flags
 swiglu_fwd: *gemm_flags

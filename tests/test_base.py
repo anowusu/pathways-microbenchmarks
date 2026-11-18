@@ -11,8 +11,11 @@ from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import dtypes
+from accelerator_microbenchmarks.core import profiler
 from accelerator_microbenchmarks.core import report
 from accelerator_microbenchmarks.core import system
 from accelerator_microbenchmarks.tests import test_report_utils
@@ -22,6 +25,31 @@ import numpy as np
 
 # Set CPU backend for fast testing without TPU requirements
 jax.config.update("jax_platform_name", "cpu")
+
+_SUB_BYTE = frozenset({dtypes.DType.INT4, dtypes.DType.FLOAT4_E2M1FN})
+_NON_FLOATING = frozenset({
+    dtypes.DType.BOOL,
+    dtypes.DType.INT4,
+    dtypes.DType.INT8,
+    dtypes.DType.INT16,
+    dtypes.DType.INT32,
+    dtypes.DType.INT64,
+    dtypes.DType.UINT8,
+    dtypes.DType.COMPLEX64,
+})
+
+
+def _dtype_names(exclude: frozenset[dtypes.DType] = frozenset()) -> str:
+  """Returns the DType values not in `exclude`, as listed in dtype errors."""
+  # The enum's content and order are pinned by test_dtypes.py. Expected subsets
+  # exclude explicitly named members rather than reusing the code under test
+  # (e.g. `dtypes_matching` or `dtypes.is_sub_byte_dtype`).
+  return ", ".join(d for d in dtypes.DType if d not in exclude)
+
+
+_ALL_DTYPE_NAMES = _dtype_names()
+_NON_SUB_BYTE_DTYPE_NAMES = _dtype_names(_SUB_BYTE)
+_FLOATING_DTYPE_NAMES = _dtype_names(_NON_FLOATING)
 
 
 class _Color(constants.ParamEnum):
@@ -68,7 +96,7 @@ class DummyBenchmark(base.BaseBenchmark):
     return {}
 
 
-class BaseBenchmarkParamsTest(absltest.TestCase):
+class BaseBenchmarkParamsTest(parameterized.TestCase):
   """Tests for BaseBenchmarkParams configuration and expansion contract."""
 
   def test_expand_test_cases_default_identity(self):
@@ -172,27 +200,181 @@ class BaseBenchmarkParamsTest(absltest.TestCase):
           "dtype": (jnp.bfloat16,),
           "in_dtype": (jnp.floating,),
       }
-      in_dtype: str = base.dtype_field(default="bfloat16")
-      out_dtype: str = base.dtype_field(default="bfloat16")
+      in_dtype: dtypes.DType | str = base.dtype_field(default="bfloat16")
+      out_dtype: dtypes.DType | str = base.dtype_field(default="bfloat16")
 
     CustomParams(in_dtype="float32", out_dtype="int8")
-    with self.assertRaisesRegex(ValueError, "^dtype: Unsupported dtype"):
+    with self.assertRaisesRegex(
+        ValueError,
+        r"^dtype: Unsupported dtype 'float32'\. Supported dtypes for dtype:"
+        r" bfloat16$",
+    ):
       CustomParams(dtype="float32")
     with self.assertRaisesRegex(
-        ValueError, "^in_dtype: Unsupported dtype: 'int8'"
+        ValueError,
+        rf"^in_dtype: Unsupported dtype 'int8'\. Supported dtypes for"
+        rf" in_dtype: {_FLOATING_DTYPE_NAMES}$",
     ):
       CustomParams(in_dtype="int8")
     # Unconstrained dtype fields still get the parse_dtype checks.
-    with jax.enable_x64(False), self.assertRaisesRegex(
-        ValueError, "^out_dtype: .*jax_enable_x64 is off"
+    with (
+        jax.enable_x64(False),
+        self.assertRaisesRegex(
+            ValueError, "^out_dtype: .*jax_enable_x64 is off"
+        ),
     ):
       CustomParams(out_dtype="int64")
     with self.assertRaisesRegex(
-        ValueError, "^out_dtype: Invalid dtype string: 'ones'"
+        ValueError,
+        rf"^out_dtype: Invalid dtype 'ones'\. Supported dtypes for out_dtype:"
+        rf" {_ALL_DTYPE_NAMES}$",
     ):
       CustomParams(out_dtype="ones")
-    with self.assertRaisesRegex(ValueError, "^out_dtype: Invalid dtype: None"):
+    with self.assertRaisesRegex(
+        ValueError,
+        rf"^out_dtype: Invalid dtype None\. Supported dtypes for out_dtype:"
+        rf" {_ALL_DTYPE_NAMES}$",
+    ):
       CustomParams(out_dtype=None)
+
+  @parameterized.parameters(
+      # A valid JAX dtype that is not a DType member.
+      "uint16",
+      # Names have no aliases and are case-sensitive.
+      "bf16",
+      "BFLOAT16",
+  )
+  def test_dtype_field_rejects_non_member_names(self, dtype_str):
+    """Verifies names that are not DType values list the field's dtypes."""
+    with self.assertRaisesRegex(
+        ValueError,
+        rf"^dtype: Invalid dtype '{dtype_str}'\. Supported dtypes"
+        rf" for dtype: {_ALL_DTYPE_NAMES}$",
+    ):
+      base.SingleDtypeBenchmarkParams(dtype=dtype_str)
+
+  @parameterized.named_parameters(
+      ("np_dtype", np.dtype("float32"), r"dtype\('float32'\)"),
+      ("jnp_scalar_type", jnp.float32, r"<class 'jax\.numpy\.float32'>"),
+  )
+  def test_dtype_field_rejects_non_string_values(self, value, value_regex):
+    """Verifies non-string values raise ValueError."""
+    with self.assertRaisesRegex(
+        ValueError,
+        rf"^dtype: Invalid dtype {value_regex}\. Supported dtypes for dtype:"
+        rf" {_ALL_DTYPE_NAMES}$",
+    ):
+      base.SingleDtypeBenchmarkParams(dtype=value)
+
+  def test_dtype_field_coerced_to_dtype_member(self):
+    """Verifies dtype fields hold DType members that behave like strings."""
+
+    @dataclasses.dataclass
+    class CustomParams(base.SingleDtypeBenchmarkParams):
+      out_dtype: dtypes.DType | str = base.dtype_field(default="int8")
+
+    for params in (
+        CustomParams(dtype="float32"),
+        CustomParams(dtype=dtypes.DType.FLOAT32),
+    ):
+      with self.subTest(dtype=repr(params.dtype)):
+        self.assertIs(params.dtype, dtypes.DType.FLOAT32)
+        # String defaults are coerced too.
+        self.assertIs(params.out_dtype, dtypes.DType.INT8)
+        self.assertIsInstance(params.dtype, str)
+        self.assertEqual(params.dtype, "float32")
+        self.assertEqual(f"{params.dtype}", "float32")
+        self.assertEqual(
+            json.loads(json.dumps(dataclasses.asdict(params)))["dtype"],
+            "float32",
+        )
+
+  def test_dtype_field_64_bit_accepted_with_x64(self):
+    """Verifies 64-bit members are accepted once jax_enable_x64 is on."""
+    with jax.enable_x64(True):
+      params = base.SingleDtypeBenchmarkParams(dtype="int64")
+    self.assertIs(params.dtype, dtypes.DType.INT64)
+
+  def test_allowed_dtypes(self):
+    """Verifies allowed_dtypes expands DTYPE_CONSTRAINTS to DType members."""
+
+    @dataclasses.dataclass
+    class CustomParams(base.SingleDtypeBenchmarkParams):
+      DTYPE_CONSTRAINTS = {"dtype": (jnp.float32, jnp.integer)}
+      out_dtype: dtypes.DType | str = base.dtype_field(default="bfloat16")
+
+    self.assertEqual(
+        CustomParams.allowed_dtypes("dtype"),
+        (
+            dtypes.DType.INT4,
+            dtypes.DType.INT8,
+            dtypes.DType.INT16,
+            dtypes.DType.INT32,
+            dtypes.DType.INT64,
+            dtypes.DType.UINT8,
+            dtypes.DType.FLOAT32,
+        ),
+    )
+    self.assertEqual(
+        CustomParams.allowed_dtypes("out_dtype"), tuple(dtypes.DType)
+    )
+
+  @parameterized.parameters("num_runs", "not_a_field")
+  def test_allowed_dtypes_rejects_non_dtype_field(self, field_name):
+    """Verifies allowed_dtypes only accepts dtype field names."""
+    with self.assertRaisesRegex(
+        ValueError,
+        rf"^SingleDtypeBenchmarkParams\.{field_name} is not a dtype field\.$",
+    ):
+      base.SingleDtypeBenchmarkParams.allowed_dtypes(field_name)
+
+  def test_subclass_dtype_constraints_replace_parent(self):
+    """Verifies a subclass's DTYPE_CONSTRAINTS replaces its parent's."""
+
+    @dataclasses.dataclass
+    class ParentParams(base.SingleDtypeBenchmarkParams):
+      DTYPE_CONSTRAINTS = {"dtype": (jnp.bfloat16,)}
+
+    @dataclasses.dataclass
+    class ChildParams(ParentParams):
+      DTYPE_CONSTRAINTS = {"dtype": (jnp.float32,)}
+
+    self.assertEqual(
+        ChildParams.allowed_dtypes("dtype"), (dtypes.DType.FLOAT32,)
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        r"^dtype: Unsupported dtype 'bfloat16'\. Supported dtypes for dtype:"
+        r" float32$",
+    ):
+      ChildParams()
+
+  @parameterized.named_parameters(
+      ("no_member", (jnp.uint16,), True, "matches no allowed DType member"),
+      ("empty", (), True, "matches no allowed DType member"),
+      (
+          "sub_byte_only",
+          (jnp.int4, jnp.float4_e2m1fn),
+          False,
+          "matches no allowed DType member",
+      ),
+  )
+  def test_dtype_constraints_invalid_entry_raises(
+      self, constraint, allow_sub_byte, error_regex
+  ):
+    """Verifies misconfigured DTYPE_CONSTRAINTS entries raise TypeError."""
+
+    @dataclasses.dataclass
+    class CustomParams(base.SingleDtypeBenchmarkParams):
+      DTYPE_CONSTRAINTS = {"dtype": constraint}
+      ALLOW_SUB_BYTE_DTYPES = allow_sub_byte
+
+    # `allowed_dtypes()` raises too, so `cli.py` fails at parser construction
+    # instead of registering a flag with no valid choices.
+    with self.assertRaisesRegex(TypeError, error_regex):
+      CustomParams.allowed_dtypes("dtype")
+    with self.assertRaisesRegex(TypeError, error_regex):
+      CustomParams()
 
   def test_dtype_constraints_non_dtype_key_raises(self):
     """Verifies a DTYPE_CONSTRAINTS key that is not a dtype field raises."""
@@ -217,16 +399,102 @@ class BaseBenchmarkParamsTest(absltest.TestCase):
         ):
           params_cls()
 
+  def test_allow_sub_byte_dtypes(self):
+    """Verifies ALLOW_SUB_BYTE_DTYPES gates sub-byte dtypes, per class."""
+
+    @dataclasses.dataclass
+    class NoSubByteParams(base.SingleDtypeBenchmarkParams):
+      ALLOW_SUB_BYTE_DTYPES = False
+      out_dtype: dtypes.DType | str = base.dtype_field(default="bfloat16")
+
+    @dataclasses.dataclass
+    class ChildParams(NoSubByteParams):
+      pass
+
+    # Allowed by default.
+    params = base.SingleDtypeBenchmarkParams(dtype="int4")
+    self.assertEqual(params.dtype, "int4")
+    # Byte-sized dtypes are unaffected by the flag.
+    for dtype in ("int8", "bool", "float8_e4m3fn"):
+      NoSubByteParams(dtype=dtype, out_dtype=dtype)
+    # Every dtype field is checked, and subclasses inherit the flag.
+    for params_cls, field, dtype in (
+        (NoSubByteParams, "dtype", "int4"),
+        (NoSubByteParams, "out_dtype", "float4_e2m1fn"),
+        (ChildParams, "dtype", "int4"),
+    ):
+      with self.subTest(cls=params_cls.__name__, field=field):
+        with self.assertRaisesRegex(
+            ValueError,
+            rf"^{field}: Unsupported sub-byte dtype '{dtype}'\..*"
+            rf"{params_cls.__name__} counts itemsize .*\. Supported dtypes"
+            rf" for {field}: {_NON_SUB_BYTE_DTYPE_NAMES}$",
+        ):
+          params_cls(**{field: dtype})
+
+  def test_allowed_dtypes_excludes_sub_byte_unless_allowed(self):
+    """Verifies allowed_dtypes honors ALLOW_SUB_BYTE_DTYPES."""
+
+    @dataclasses.dataclass
+    class NoSubByteParams(base.SingleDtypeBenchmarkParams):
+      DTYPE_CONSTRAINTS = {"dtype": (jnp.integer, jnp.floating)}
+      ALLOW_SUB_BYTE_DTYPES = False
+      out_dtype: dtypes.DType | str = base.dtype_field(default="bfloat16")
+
+    # Must not go through `parse_dtype`, which rejects 64-bit names without
+    # x64 (allowed_dtypes() runs when the CLI parser is built).
+    with jax.enable_x64(False):
+      self.assertEqual(
+          ", ".join(NoSubByteParams.allowed_dtypes("dtype")),
+          _dtype_names(_SUB_BYTE | {dtypes.DType.BOOL, dtypes.DType.COMPLEX64}),
+      )
+      self.assertEqual(
+          ", ".join(NoSubByteParams.allowed_dtypes("out_dtype")),
+          _NON_SUB_BYTE_DTYPE_NAMES,
+      )
+    self.assertIn(
+        dtypes.DType.INT4,
+        base.SingleDtypeBenchmarkParams.allowed_dtypes("dtype"),
+    )
+
+  def test_sub_byte_error_blames_constraint_before_sub_byte_flag(self):
+    """Verifies DTYPE_CONSTRAINTS errors take precedence over sub-byte ones."""
+
+    @dataclasses.dataclass
+    class CustomParams(base.SingleDtypeBenchmarkParams):
+      DTYPE_CONSTRAINTS = {"dtype": (jnp.floating,)}
+      ALLOW_SUB_BYTE_DTYPES = False
+
+    supported = "Supported dtypes for dtype: " + _dtype_names(
+        _NON_FLOATING | _SUB_BYTE
+    )
+    with self.assertRaisesRegex(
+        ValueError, rf"^dtype: Unsupported dtype 'int4'\. {supported}$"
+    ):
+      CustomParams(dtype="int4")
+    with self.assertRaisesRegex(
+        ValueError,
+        rf"^dtype: Unsupported sub-byte dtype 'float4_e2m1fn'\. .*"
+        rf" {supported}$",
+    ):
+      CustomParams(dtype="float4_e2m1fn")
+
   def test_only_dtype_field_fields_are_validated(self):
     """Verifies dtype fields are marked by dtype_field(), not by name."""
 
     @dataclasses.dataclass
     class CustomParams(base.BaseBenchmarkParams):
       foo_dtype: str = "not_a_dtype"
-      precision: str = base.dtype_field(default="bfloat16")
+      precision: dtypes.DType | str = base.dtype_field(default="bfloat16")
 
-    CustomParams()
-    with self.assertRaisesRegex(ValueError, "^precision: Invalid dtype"):
+    params = CustomParams()
+    self.assertEqual(params.foo_dtype, "not_a_dtype")
+    fields = {f.name: f for f in dataclasses.fields(CustomParams)}
+    self.assertTrue(base.is_dtype_field(fields["precision"]))
+    self.assertFalse(base.is_dtype_field(fields["foo_dtype"]))
+    with self.assertRaisesRegex(
+        ValueError, "^precision: Invalid dtype 'not_a_dtype'"
+    ):
       CustomParams(precision="not_a_dtype")
 
   def test_dtype_field_keeps_metadata(self):
@@ -234,7 +502,7 @@ class BaseBenchmarkParamsTest(absltest.TestCase):
 
     @dataclasses.dataclass
     class CustomParams(base.BaseBenchmarkParams):
-      in_dtype: str = base.dtype_field(
+      in_dtype: dtypes.DType | str = base.dtype_field(
           default="float32", metadata={"help": "Input dtype."}
       )
 
@@ -278,6 +546,9 @@ class BaseBenchmarkTest(absltest.TestCase):
         return_value=test_report_utils.DEFAULT_TEST_PLATFORM_INFO,
     )
     self._platform_patcher.start()
+    self.mock_load_trace, self.mock_print = (
+        test_report_utils.patch_xprof_trace_loading(self)
+    )
 
   def tearDown(self):
     self._platform_patcher.stop()
@@ -346,18 +617,25 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIsNotNone(result.metadata.platform_info)
     self.assertEqual(result.metadata.hardware_spec, hw_spec)
     self.assertIsNone(result.metadata.xprof_config)
+    self.assertLen(result.timings.wall_clock.durations_ms, 5)
+    self.assertIsNone(result.timings.xprof)
     # XProf run counts are omitted entirely when xprof_timing is disabled.
     self.assertNotIn("xprof_captured_runs", result.metrics)
     self.assertNotIn("xprof_expected_runs", result.metrics)
 
     # Validate Roofline values are NOT computed by default for NONE mode
-    self.assertNotIn("roofline_tflops_limit_per_device", result.metrics)
     self.assertNotIn(
-        "wall_clock_compute_roofline_efficiency_pct", result.metrics
+        "roofline_tflops_limit_per_device",
+        result.metrics,
+    )
+    self.assertNotIn(
+        "wall_clock_compute_roofline_efficiency_pct",
+        result.metrics,
     )
     self.assertNotIn("peak_hbm_bw_per_device_gb_s", result.metrics)
     self.assertNotIn(
-        "wall_clock_memory_roofline_efficiency_pct", result.metrics
+        "wall_clock_memory_roofline_efficiency_pct",
+        result.metrics,
     )
 
   def test_run_calls_teardown_on_success(self):
@@ -417,15 +695,24 @@ class BaseBenchmarkTest(absltest.TestCase):
     bm = ComputeDummyBenchmark(config=config, hardware_spec=hw_spec)
     result = bm.run()
 
-    self.assertIn("roofline_tflops_limit_per_device", result.metrics)
-    self.assertIn("wall_clock_compute_roofline_efficiency_pct", result.metrics)
+    self.assertIn(
+        "roofline_tflops_limit_per_device",
+        result.metrics,
+    )
+    self.assertIn(
+        "wall_clock_compute_roofline_efficiency_pct",
+        result.metrics,
+    )
     self.assertIn("peak_hbm_bw_per_device_gb_s", result.metrics)
     self.assertNotIn(
-        "wall_clock_memory_roofline_efficiency_pct", result.metrics
+        "wall_clock_memory_roofline_efficiency_pct",
+        result.metrics,
     )
 
   @mock.patch("jax.profiler.trace")
   def test_xprof_naming_with_identifier(self, mock_trace):
+    """Tests XProf directory naming when get_run_identifier is non-empty."""
+
     class BenchmarkWithId(DummyBenchmark):
 
       def get_run_identifier(self) -> str:
@@ -450,8 +737,8 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIn("BenchmarkWithId_test_id_42_", called_path)
     self.assertTrue(called_path.startswith("/tmp/test_xprof/"))
 
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -484,14 +771,31 @@ class BaseBenchmarkTest(absltest.TestCase):
 
     # Assert XProf metrics correctly reflect the mocked XProf durations
     self.assertEqual(result.metrics["xprof_avg_ms"], 5.0)
-    self.assertEqual(result.metrics["xprof_url"], "http://mock_xprof_url")
+    self.assertEqual(
+        result.metrics["xprof_url"],
+        "http://mock_xprof_url",
+    )
     self.assertEqual(result.metadata.xprof_config, xprof_config)
+    self.assertEqual(result.timings.xprof.durations_ms, [5.0] * 5)
+    self.assertEqual(result.timings.xprof.measured_device, "process_0/TPU:0")
+    self.assertEqual(
+        result.timings.xprof.metrics_per_local_device,
+        {
+            "process_0/TPU:0": {
+                "p50_ms": 5.0,
+                "avg_ms": 5.0,
+                "p90_ms": 5.0,
+                "std_ms": 0.0,
+            }
+        },
+    )
 
     mock_upload.assert_called_once()
+    self.mock_load_trace.assert_called_once()
     mock_parse_durations.assert_called_once()
 
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -521,15 +825,18 @@ class BaseBenchmarkTest(absltest.TestCase):
         xprof_timing=True, xprof_dir="/tmp/test_xprof"
     )
     bm = HostCpuBenchmark(config=config, xprof_config=xprof_config)
-    bm.run()
+    result = bm.run()
 
     mock_parse_durations.assert_called_once()
     self.assertIsNone(
         mock_parse_durations.call_args.kwargs.get("local_device_id")
     )
+    self.assertEqual(result.timings.xprof.durations_ms, [2.0])
+    self.assertIsNone(result.timings.xprof.measured_device)
+    self.assertIsNone(result.timings.xprof.metrics_per_local_device)
 
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -557,13 +864,17 @@ class BaseBenchmarkTest(absltest.TestCase):
     mock_parse_durations.assert_called_once()
     self.assertIsNone(result.metrics["xprof_avg_ms"])
     self.assertIsNone(result.metrics["xprof_p50_ms"])
+    # No XProf data: neither a measured device nor zero-filled device stats.
+    self.assertEqual(result.timings.xprof.durations_ms, [])
+    self.assertIsNone(result.timings.xprof.measured_device)
+    self.assertIsNone(result.timings.xprof.metrics_per_local_device)
     self.assertGreater(result.metrics["wall_clock_avg_ms"], 0.0)
     self.assertEqual(result.metrics["xprof_captured_runs"], 0)
     self.assertEqual(result.metrics["xprof_expected_runs"], 1)
 
   @mock.patch("jax.experimental.multihost_utils.broadcast_one_to_all")
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -597,7 +908,7 @@ class BaseBenchmarkTest(absltest.TestCase):
     mock_trace.return_value = contextlib.nullcontext()
     mock_upload.return_value = "http://mock_xprof_url"
     mock_broadcast.side_effect = [
-        np.int32(3),
+        np.array([3, 0], dtype=np.int32),
         np.array([4.0, 4.1, 4.5], dtype=np.float32),
     ]
 
@@ -622,6 +933,8 @@ class BaseBenchmarkTest(absltest.TestCase):
     # Captured run count is derived from the broadcast owner durations
     # (the non-owner's local parse is skipped).
     self.assertEqual(result.metrics["xprof_captured_runs"], 3)
+    self.assertEqual(result.timings.xprof.measured_device, "process_0/TPU:0")
+    self.assertIsNone(result.timings.xprof.metrics_per_local_device)
 
     with self.subTest(
         "value_error_propagates_in_measured_device_or_first_mode"
@@ -635,8 +948,8 @@ class BaseBenchmarkTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, "unequal steps"):
           bm_first.run()
 
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -684,8 +997,8 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertEqual(result.metrics["xprof_captured_runs"], 3)
     self.assertEqual(result.metrics["xprof_expected_runs"], 3)
 
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -738,13 +1051,19 @@ class BaseBenchmarkTest(absltest.TestCase):
         )
         buf = io.StringIO()
         with (
-            mock.patch(
-                "accelerator_microbenchmarks.core.profiler.parse_xprof_durations",
+            mock.patch.object(
+                profiler.XprofTrace,
+                "device_step_durations_ms",
+                autospec=True,
                 **parse_kwargs,
             ),
             contextlib.redirect_stdout(buf),
         ):
           result = bm.run()
+        if case_name == "parse_exception":
+          test_report_utils.assert_swallowed_xprof_parse_error(
+              self, self.mock_print
+          )
 
         self.assertEqual(result.metrics["xprof_captured_runs"], 0)
         self.assertEqual(result.metrics["xprof_expected_runs"], 4)
@@ -755,8 +1074,8 @@ class BaseBenchmarkTest(absltest.TestCase):
         )
         self.assertNotIn("truncated trace", buf.getvalue())
 
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -781,8 +1100,8 @@ class BaseBenchmarkTest(absltest.TestCase):
     ):
       bm.run()
 
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -813,13 +1132,14 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertEqual(summary_rows[0]["xprof_expected_runs"], "4")
     with open(os.path.join(output_dir, "detailed.json")) as f:
       detailed = json.load(f)
-    self.assertEqual(detailed[0]["metrics"]["xprof_captured_runs"], 2)
-    self.assertEqual(detailed[0]["metrics"]["xprof_expected_runs"], 4)
+    measurement = detailed[0]
+    self.assertEqual(measurement["metrics"]["xprof_captured_runs"], 2)
+    self.assertEqual(measurement["metrics"]["xprof_expected_runs"], 4)
 
   @mock.patch("jax.experimental.multihost_utils.broadcast_one_to_all")
   @mock.patch("jax.experimental.multihost_utils.process_allgather")
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -838,18 +1158,7 @@ class BaseBenchmarkTest(absltest.TestCase):
     """Verifies global_slowest_per_step runs on all hosts, skips broadcast, and derives bandwidth from p50."""
 
     class MultihostCollectiveDummyBenchmark(DummyBenchmark):
-      """Dummy benchmark requiring multihost sync with bandwidth metrics."""
-
-      @property
-      def requires_multihost_sync(self) -> bool:
-        return True
-
-      def get_device_to_measure(self):
-        mock_device = mock.Mock()
-        mock_device.id = 0
-        mock_device.process_index = 0
-        mock_device.local_hardware_id = 0
-        return mock_device
+      """Dummy collective benchmark with bandwidth metrics."""
 
       def calculate_throughput_metrics(
           self, latency_ms: float, prefix: constants.TimingDomain
@@ -864,7 +1173,7 @@ class BaseBenchmarkTest(absltest.TestCase):
     mock_trace.return_value = contextlib.nullcontext()
     mock_upload.return_value = None
     mock_parse_durations.side_effect = (
-        lambda _dir, _fn=None, local_device_id=0: [8.0, 20.0, 28.0]
+        lambda _trace, local_device_id=0: [8.0, 20.0, 28.0]
         if local_device_id == 0
         else [10.0, 18.0, 30.0]
     )
@@ -889,14 +1198,36 @@ class BaseBenchmarkTest(absltest.TestCase):
     mock_broadcast.assert_not_called()
     self.assertEqual(mock_allgather.call_count, 2)
     self.assertAlmostEqual(result.metrics["xprof_p50_ms"], 25.0, places=4)
-    self.assertAlmostEqual(result.metrics["xprof_avg_ms"], 70.0 / 3.0, places=4)
     self.assertAlmostEqual(
-        result.metrics["xprof_bandwidth_per_chip_gb_s"], 40.0, places=4
+        result.metrics["xprof_avg_ms"],
+        70.0 / 3.0,
+        places=4,
+    )
+    self.assertAlmostEqual(
+        result.metrics["xprof_bandwidth_per_chip_gb_s"],
+        40.0,
+        places=4,
+    )
+    self.assertEqual(result.timings.xprof.durations_ms, [15.0, 25.0, 30.0])
+    self.assertIsNone(result.timings.xprof.measured_device)
+    # Per-local-device entries are latency-only and keyed by this host.
+    self.assertEqual(
+        {
+            dev: entry["p50_ms"]
+            for dev, entry in (
+                result.timings.xprof.metrics_per_local_device.items()
+            )
+        },
+        {"process_1/TPU:0": 20.0, "process_1/TPU:1": 18.0},
+    )
+    self.assertCountEqual(
+        result.timings.xprof.metrics_per_local_device["process_1/TPU:0"],
+        ["p50_ms", "avg_ms", "p90_ms", "std_ms"],
     )
 
   @mock.patch("jax.experimental.multihost_utils.process_allgather")
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -918,7 +1249,10 @@ class BaseBenchmarkTest(absltest.TestCase):
       ):
         return {f"{prefix}_bandwidth_per_chip_gb_s": 1000.0 / latency_ms}
 
-    fake_devs = [mock.MagicMock(local_hardware_id=0)]
+    fake_devs = [
+        mock.MagicMock(local_hardware_id=0),
+        mock.MagicMock(local_hardware_id=1),
+    ]
     mock_trace.return_value = contextlib.nullcontext()
     mock_upload.return_value = None
     mock_parse_durations.return_value = [15.0, 25.0, 30.0]
@@ -944,8 +1278,8 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIsNone(result.metrics["xprof_bandwidth_per_chip_gb_s"])
 
   @mock.patch("jax.experimental.multihost_utils.process_allgather")
-  @mock.patch(
-      "accelerator_microbenchmarks.core.profiler.parse_xprof_durations"
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
   )
   @mock.patch(
       "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
@@ -959,7 +1293,10 @@ class BaseBenchmarkTest(absltest.TestCase):
       mock_allgather,
   ):
     """Verifies _apply_xprof_timing_and_sync propagates ValueError under GLOBAL_SLOWEST_PER_STEP."""
-    fake_devs = [mock.MagicMock(local_hardware_id=0)]
+    fake_devs = [
+        mock.MagicMock(local_hardware_id=0),
+        mock.MagicMock(local_hardware_id=1),
+    ]
     mock_trace.return_value = contextlib.nullcontext()
     mock_upload.return_value = None
     mock_parse_durations.return_value = [15.0, 25.0, 30.0]
@@ -998,6 +1335,29 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIsInstance(bm.xprof_config, base.XprofConfig)
     self.assertFalse(bm.xprof_config.xprof_timing)
     self.assertEqual(bm.xprof_config.xprof_dir, "/tmp/tensorboard")
+    self.assertEqual(bm.get_devices_to_measure(), list(jax.local_devices()))
+    self.assertEqual(
+        bm.get_xprof_device_timing_aggregation(),
+        constants.XprofDeviceTimingAggregation.MEASURED_DEVICE_OR_FIRST,
+    )
+
+  def test_get_device_to_measure_defaults_to_first_device_to_measure(self):
+    """Tests get_device_to_measure() returns get_devices_to_measure()[0]."""
+    devs = [mock.MagicMock(id=i) for i in range(4)]
+
+    class NarrowedBenchmark(DummyBenchmark):
+
+      def get_devices_to_measure(self) -> list[jax.Device]:
+        return devs[2:]
+
+    with mock.patch.object(jax, "local_devices", return_value=devs):
+      # Default: get_devices_to_measure() is all local devices.
+      bm = DummyBenchmark()
+      self.assertEqual(bm.get_devices_to_measure(), devs)
+      self.assertIs(bm.get_device_to_measure(), devs[0])
+      # Subclass narrowing get_devices_to_measure() is inherited.
+      narrowed = NarrowedBenchmark()
+      self.assertIs(narrowed.get_device_to_measure(), devs[2])
 
   def test_run_metadata_env_flags(self):
     """Tests BaseBenchmark.run() captures runtime flags or defaults to empty."""
@@ -1036,14 +1396,14 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIn("wall_clock_bandwidth_per_chip_gb_s", derived)
     self.assertEqual(derived["wall_clock_bandwidth_per_chip_gb_s"], 200.0)
 
-    # If wall_clock_bandwidth_per_device_gb_s is None, wall_clock_bandwidth_per_chip_gb_s is also None
+    # If wall_clock_bandwidth_per_device_gb_s is None, chip bw is also None
     metrics_none = {"wall_clock_bandwidth_per_device_gb_s": None}
     derived_none = bm.derive_chip_metrics(metrics_none)
     self.assertIn("wall_clock_bandwidth_per_device_gb_s", derived_none)
     self.assertIn("wall_clock_bandwidth_per_chip_gb_s", derived_none)
     self.assertIsNone(derived_none["wall_clock_bandwidth_per_chip_gb_s"])
 
-    # If wall_clock_bandwidth_per_chip_gb_s is already present, it is not overwritten
+    # If wall_clock_bandwidth_per_chip_gb_s is already present, keep it
     metrics_existing = {
         "wall_clock_bandwidth_per_device_gb_s": 100.0,
         "wall_clock_bandwidth_per_chip_gb_s": 300.0,
@@ -1085,7 +1445,7 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIn("wall_clock_tflops_per_chip", derived)
     self.assertEqual(derived["wall_clock_tflops_per_chip"], 300.0)
 
-    # If wall_clock_tflops_per_device is None, wall_clock_tflops_per_chip is also None
+    # If wall_clock_tflops_per_device is None, tflops_per_chip is also None
     metrics_none = {"wall_clock_tflops_per_device": None}
     derived_none = bm.derive_chip_metrics(metrics_none)
     self.assertIn("wall_clock_tflops_per_device", derived_none)
@@ -1118,7 +1478,7 @@ class BaseBenchmarkTest(absltest.TestCase):
     metrics = {"wall_clock_bandwidth_per_device_gb_s": 50.0}
     # pylint: disable=protected-access
     # Simulate empty duration fallback (synced_avg = 0.0)
-    result_metrics = bm._apply_xprof_timing_and_sync(metrics)
+    result_metrics, _ = bm._apply_xprof_timing_and_sync(metrics)
 
     # Wall clock throughput remains intact!
     self.assertEqual(
@@ -1129,6 +1489,695 @@ class BaseBenchmarkTest(absltest.TestCase):
     self.assertIsNone(result_metrics["xprof_bandwidth_per_device_gb_s"])
     self.assertNotIn("xprof_bandwidth_per_chip_gb_s", result_metrics)
     self.assertNotIn("xprof_tflops_per_device", result_metrics)
+
+  @mock.patch.object(
+      profiler.XprofTrace, "device_step_durations_ms", autospec=True
+  )
+  @mock.patch(
+      "accelerator_microbenchmarks.core.profiler.upload_xprof_trace"
+  )
+  @mock.patch("jax.profiler.trace")
+  def test_xprof_timings_by_mode(
+      self, mock_trace, mock_upload, mock_parse_durations
+  ):
+    """Verifies one trace load per run and timings.xprof per mode."""
+
+    class SingleDeviceDummyBenchmark(DummyBenchmark):
+      """Overrides get_devices_to_measure like HBMBandwidthBenchmark."""
+
+      def get_device_to_measure(self):
+        return jax.local_devices()[1]
+
+      def get_devices_to_measure(self):
+        return [self.get_device_to_measure()]
+
+    fake_devs = [
+        mock.MagicMock(process_index=0, local_hardware_id=0),
+        mock.MagicMock(process_index=0, local_hardware_id=1),
+    ]
+    mock_trace.return_value = contextlib.nullcontext()
+    mock_upload.return_value = None
+    mock_parse_durations.side_effect = (
+        lambda _trace, local_device_id: [2.0, 2.0, 2.0]
+        if local_device_id == 0
+        else [4.0, 4.0, 4.0]
+    )
+
+    def run(benchmark_cls, aggregation):
+      self.mock_load_trace.reset_mock()
+      mock_parse_durations.reset_mock()
+      result = benchmark_cls(
+          config=base.BaseBenchmarkParams(warmup_tries=0, num_runs=3),
+          xprof_config=base.XprofConfig(
+              xprof_timing=True,
+              xprof_dir="/tmp/test_xprof",
+              device_timing_aggregation=aggregation,
+          ),
+      ).run()
+      # Parse-once: one trace load shared by every per-device parse.
+      self.mock_load_trace.assert_called_once()
+      return result
+
+    with mock.patch.object(jax, "local_devices", return_value=fake_devs):
+      res_first = run(
+          DummyBenchmark,
+          constants.XprofDeviceTimingAggregation.MEASURED_DEVICE_OR_FIRST,
+      )
+      self.assertEqual(mock_parse_durations.call_count, 2)
+      res_slowest = run(
+          DummyBenchmark,
+          constants.XprofDeviceTimingAggregation.LOCAL_SLOWEST_DEVICE,
+      )
+      self.assertEqual(mock_parse_durations.call_count, 2)
+      res_single = run(
+          SingleDeviceDummyBenchmark,
+          constants.XprofDeviceTimingAggregation.MEASURED_DEVICE_OR_FIRST,
+      )
+      mock_parse_durations.assert_called_once()
+
+    self.assertEqual(res_first.timings.xprof.measured_device, "process_0/TPU:0")
+    self.assertEqual(res_first.timings.xprof.durations_ms, [2.0, 2.0, 2.0])
+    self.assertEqual(
+        res_slowest.timings.xprof.measured_device, "process_0/TPU:1"
+    )
+    self.assertEqual(res_slowest.timings.xprof.durations_ms, [4.0, 4.0, 4.0])
+    self.assertEqual(
+        res_single.timings.xprof.measured_device, "process_0/TPU:1"
+    )
+    self.assertEqual(res_single.timings.xprof.durations_ms, [4.0, 4.0, 4.0])
+    expected_per_local_device = {
+        "process_0/TPU:0": {
+            "p50_ms": 2.0,
+            "avg_ms": 2.0,
+            "p90_ms": 2.0,
+            "std_ms": 0.0,
+        },
+        "process_0/TPU:1": {
+            "p50_ms": 4.0,
+            "avg_ms": 4.0,
+            "p90_ms": 4.0,
+            "std_ms": 0.0,
+        },
+    }
+    for result in (res_first, res_slowest):
+      self.assertEqual(
+          result.timings.xprof.metrics_per_local_device,
+          expected_per_local_device,
+      )
+    # get_devices_to_measure() override: a one-entry map for the target device.
+    self.assertEqual(
+        res_single.timings.xprof.metrics_per_local_device,
+        {"process_0/TPU:1": expected_per_local_device["process_0/TPU:1"]},
+    )
+
+    output_dir = self.create_tempdir().full_path
+    report.save_output([res_first], output_dir=output_dir)
+    with open(os.path.join(output_dir, "detailed.json")) as f:
+      detailed = json.load(f)[0]
+    self.assertEqual(
+        detailed["timings"]["xprof"],
+        {
+            "durations_ms": [2.0, 2.0, 2.0],
+            "measured_device": "process_0/TPU:0",
+            "metrics_per_local_device": expected_per_local_device,
+        },
+    )
+    self.assertLen(detailed["timings"]["wall_clock"]["durations_ms"], 3)
+
+  def test_get_devices_to_measure_rejects_non_local_devices(self):
+    """Verifies per-device collection raises on a device of another process."""
+
+    class RemoteDeviceDummyBenchmark(DummyBenchmark):
+
+      def get_devices_to_measure(self):
+        return [mock.MagicMock(local_hardware_id=0)]
+
+    bm = RemoteDeviceDummyBenchmark(
+        xprof_config=base.XprofConfig(xprof_timing=True)
+    )
+    with self.assertRaisesRegex(ValueError, "not local to process"):
+      bm.executor.get_xprof_durations("/tmp/fake")
+
+  def test_device_timing_aggregation_validation(self):
+    """Verifies supported_device_timing_aggregations and validation behavior."""
+
+    agg = constants.XprofDeviceTimingAggregation
+
+    class HostCpuDummyBenchmark(DummyBenchmark):
+
+      @property
+      def xprof_target_host_cpu(self) -> bool:
+        return True
+
+    class MultihostSyncDummyBenchmark(DummyBenchmark):
+
+      @property
+      def requires_multihost_sync(self) -> bool:
+        return True
+
+    class SingleDeviceDummyBenchmark(DummyBenchmark):
+
+      @property
+      def supported_device_timing_aggregations(
+          self,
+      ) -> frozenset[constants.XprofDeviceTimingAggregation]:
+        return frozenset({agg.MEASURED_DEVICE_OR_FIRST})
+
+    # Even on a 1-device CPU backend, a multi-device benchmark supports all 3.
+    self.assertLen(jax.local_devices(), 1)
+    default_bm = DummyBenchmark()
+    self.assertEqual(
+        default_bm.supported_device_timing_aggregations, frozenset(agg)
+    )
+    for aggregation in agg:
+      bm = DummyBenchmark(
+          xprof_config=base.XprofConfig(
+              xprof_timing=True, device_timing_aggregation=aggregation
+          )
+      )
+      bm._validate_device_timing_aggregation()  # pylint: disable=protected-access
+
+    for benchmark_cls, error_regex in (
+        (
+            HostCpuDummyBenchmark,
+            (
+                r"does not support xprof_device_timing_aggregation=.*;"
+                r" supported: measured_device_or_first \(XProf timing measures"
+                r" /host:CPU, not per-device kernels\)\."
+            ),
+        ),
+        (
+            MultihostSyncDummyBenchmark,
+            (
+                r"does not support xprof_device_timing_aggregation=.*;"
+                r" supported: measured_device_or_first \(results are already"
+                r" synced across hosts via owner broadcast\)\."
+            ),
+        ),
+        (
+            SingleDeviceDummyBenchmark,
+            (
+                r"does not support xprof_device_timing_aggregation=.*;"
+                r" supported: measured_device_or_first\."
+            ),
+        ),
+    ):
+      bm_first = benchmark_cls(
+          xprof_config=base.XprofConfig(
+              xprof_timing=True,
+              device_timing_aggregation=agg.MEASURED_DEVICE_OR_FIRST,
+          )
+      )
+      self.assertEqual(
+          bm_first.supported_device_timing_aggregations,
+          frozenset({agg.MEASURED_DEVICE_OR_FIRST}),
+      )
+      bm_first._validate_device_timing_aggregation()  # pylint: disable=protected-access
+
+      for unsupported in (
+          agg.LOCAL_SLOWEST_DEVICE,
+          agg.GLOBAL_SLOWEST_PER_STEP,
+      ):
+        with self.subTest(f"{benchmark_cls.__name__}_{unsupported}"):
+          bm = benchmark_cls(
+              xprof_config=base.XprofConfig(
+                  xprof_timing=True, device_timing_aggregation=unsupported
+              )
+          )
+          with self.assertRaisesRegex(ValueError, error_regex):
+            bm._validate_device_timing_aggregation()  # pylint: disable=protected-access
+
+  @mock.patch("jax.profiler.trace")
+  def test_run_validates_device_timing_aggregation_only_with_xprof_timing(
+      self, mock_trace
+  ):
+    """Verifies run() rejects an unsupported aggregation before setup, only with XProf."""
+
+    class MultihostSyncDummyBenchmark(DummyBenchmark):
+
+      @property
+      def requires_multihost_sync(self) -> bool:
+        return True
+
+    mock_trace.return_value = contextlib.nullcontext()
+    config = base.BaseBenchmarkParams(warmup_tries=0, num_runs=1)
+    aggregation = constants.XprofDeviceTimingAggregation.GLOBAL_SLOWEST_PER_STEP
+    MultihostSyncDummyBenchmark(
+        config=config,
+        xprof_config=base.XprofConfig(
+            xprof_timing=False, device_timing_aggregation=aggregation
+        ),
+    ).run()
+
+    bm = MultihostSyncDummyBenchmark(
+        config=config,
+        xprof_config=base.XprofConfig(
+            xprof_timing=True,
+            xprof_dir="/tmp/test_xprof",
+            device_timing_aggregation=aggregation,
+        ),
+    )
+    with (
+        mock.patch.object(bm, "setup") as mock_setup,
+        self.assertRaisesRegex(ValueError, "synced across hosts"),
+    ):
+      bm.run()
+    mock_setup.assert_not_called()
+
+  def test_scope_params_mixin_defaults_and_validation(self):
+    """Tests ScopeParamsMixin defaults, override, and non-negative integer validation."""
+
+    @dataclasses.dataclass
+    class DefaultScopedParams(base.ScopeParamsMixin, base.BaseBenchmarkParams):
+      pass
+
+    @dataclasses.dataclass
+    class HostDefaultParams(base.ScopeParamsMixin, base.BaseBenchmarkParams):
+      scope: constants.Scope = constants.Scope.HOST
+
+    self.assertFalse(
+        issubclass(base.ScopeParamsMixin, base.BaseBenchmarkParams)
+    )
+
+    p_default = DefaultScopedParams()
+    self.assertEqual(p_default.scope, constants.Scope.DEVICE)
+    self.assertEqual(p_default.local_index, 0)
+
+    p_chip = DefaultScopedParams(scope="chip", local_index=2)
+    self.assertEqual(p_chip.scope, constants.Scope.CHIP)
+    self.assertEqual(p_chip.local_index, 2)
+
+    p_host = HostDefaultParams()
+    self.assertEqual(p_host.scope, constants.Scope.HOST)
+    self.assertEqual(p_host.local_index, 0)
+
+    p_host_to_dev = HostDefaultParams(scope="device", local_index=3)
+    self.assertEqual(p_host_to_dev.scope, constants.Scope.DEVICE)
+    self.assertEqual(p_host_to_dev.local_index, 3)
+
+    with self.assertRaisesRegex(ValueError, "local_index must be >= 0"):
+      DefaultScopedParams(local_index=-1)
+
+    with self.assertRaisesRegex(
+        ValueError, "local_index must be an integer >= 0"
+    ):
+      DefaultScopedParams(local_index=True)
+
+  def test_get_devices_for_scope(self):
+    """Tests get_devices_for_scope across scopes, local_index, and chip grouping."""
+
+    @dataclasses.dataclass
+    class ScopedParams(base.ScopeParamsMixin, base.BaseBenchmarkParams):
+      pass
+
+    tpu7x_spec = system.HardwareSpec(
+        name=system.TpuVersion.TPU7X, devices_per_chip=2
+    )
+    v6e_spec = system.HardwareSpec(
+        name=system.TpuVersion.V6E, devices_per_chip=1
+    )
+
+    def make_bm(
+        scope: constants.Scope = constants.Scope.DEVICE,
+        local_index: int = 0,
+        hardware_spec: system.HardwareSpec | None = tpu7x_spec,
+    ) -> DummyBenchmark:
+      bm = DummyBenchmark(
+          config=ScopedParams(scope=scope, local_index=local_index),
+          hardware_spec=hardware_spec or tpu7x_spec,
+      )
+      if hardware_spec is None:
+        bm.hardware_spec = None
+      return bm
+
+    tpu7x_devs = [
+        mock.MagicMock(id=i, coords=(i // 2, 0, 0), core_on_chip=i % 2)
+        for i in range(4)
+    ]
+
+    # 1. Dual-die (devices_per_chip=2, e.g. TPU7x) across scopes and local_index
+    with mock.patch.object(jax, "local_devices", return_value=tpu7x_devs):
+      self.assertEqual(
+          make_bm(constants.Scope.DEVICE).get_devices_for_scope(),
+          tpu7x_devs[:1],
+      )
+      self.assertEqual(
+          make_bm(
+              constants.Scope.DEVICE, local_index=3
+          ).get_devices_for_scope(),
+          [tpu7x_devs[3]],
+      )
+      self.assertEqual(
+          make_bm(constants.Scope.CHIP).get_devices_for_scope(),
+          tpu7x_devs[:2],
+      )
+      self.assertEqual(
+          make_bm(constants.Scope.CHIP, local_index=1).get_devices_for_scope(),
+          tpu7x_devs[2:4],
+      )
+      self.assertEqual(
+          make_bm(constants.Scope.HOST).get_devices_for_scope(),
+          tpu7x_devs,
+      )
+
+      # Out-of-range local_index raises loudly without clamping
+      with self.assertRaisesRegex(
+          ValueError, "local_index 4 out of range for scope='device'"
+      ):
+        make_bm(constants.Scope.DEVICE, local_index=4).get_devices_for_scope()
+      with self.assertRaisesRegex(
+          ValueError, "local_index 2 out of range for scope='chip'"
+      ):
+        make_bm(constants.Scope.CHIP, local_index=2).get_devices_for_scope()
+      with self.assertRaisesRegex(
+          ValueError, "local_index must be 0 when scope='host', got 1"
+      ):
+        make_bm(constants.Scope.HOST, local_index=1).get_devices_for_scope()
+
+    # Real PJRT TpuDevice exposes `coords` as a list[int].
+    tpu7x_list_devs = [
+        mock.MagicMock(id=i, coords=[i // 2, 0, 0], core_on_chip=i % 2)
+        for i in range(4)
+    ]
+    with mock.patch.object(jax, "local_devices", return_value=tpu7x_list_devs):
+      self.assertEqual(
+          make_bm(constants.Scope.CHIP).get_devices_for_scope(),
+          tpu7x_list_devs[:2],
+      )
+
+    # 2. Reordered / interleaved local_devices groups by `coords` in encounter
+    # order instead of blindly slicing `local_devices[:devices_per_chip]`.
+    interleaved_devs = [
+        tpu7x_devs[0],  # chip (0, 0, 0), core 0
+        tpu7x_devs[2],  # chip (1, 0, 0), core 0
+        tpu7x_devs[1],  # chip (0, 0, 0), core 1
+        tpu7x_devs[3],  # chip (1, 0, 0), core 1
+    ]
+    with mock.patch.object(jax, "local_devices", return_value=interleaved_devs):
+      selected = make_bm(constants.Scope.CHIP).get_devices_for_scope()
+      self.assertEqual(selected, [tpu7x_devs[0], tpu7x_devs[1]])
+      self.assertEqual({d.coords for d in selected}, {(0, 0, 0)})
+      self.assertEqual(
+          make_bm(constants.Scope.CHIP, local_index=1).get_devices_for_scope(),
+          [tpu7x_devs[2], tpu7x_devs[3]],
+      )
+
+    chip1_first_devs = [
+        tpu7x_devs[3],  # chip (1, 0, 0), core 1
+        tpu7x_devs[0],  # chip (0, 0, 0), core 0
+        tpu7x_devs[2],  # chip (1, 0, 0), core 0
+        tpu7x_devs[1],  # chip (0, 0, 0), core 1
+    ]
+    with mock.patch.object(jax, "local_devices", return_value=chip1_first_devs):
+      selected_chip1 = make_bm(constants.Scope.CHIP).get_devices_for_scope()
+      self.assertEqual(selected_chip1, [tpu7x_devs[3], tpu7x_devs[2]])
+      self.assertEqual({d.coords for d in selected_chip1}, {(1, 0, 0)})
+
+    # 3. Single-die (devices_per_chip=1, e.g. v6e and coords-less CPU devices)
+    v6e_devs = [
+        mock.MagicMock(id=i, coords=(i, 0, 0), core_on_chip=0) for i in range(4)
+    ]
+    with mock.patch.object(jax, "local_devices", return_value=v6e_devs):
+      self.assertEqual(
+          make_bm(
+              constants.Scope.CHIP, hardware_spec=v6e_spec
+          ).get_devices_for_scope(),
+          v6e_devs[:1],
+      )
+      self.assertEqual(
+          make_bm(
+              constants.Scope.CHIP, local_index=2, hardware_spec=v6e_spec
+          ).get_devices_for_scope(),
+          [v6e_devs[2]],
+      )
+    cpu_devs = [mock.MagicMock(spec=["id"], id=i) for i in range(4)]
+    with mock.patch.object(jax, "local_devices", return_value=cpu_devs):
+      self.assertEqual(
+          make_bm(
+              constants.Scope.CHIP, hardware_spec=v6e_spec
+          ).get_devices_for_scope(),
+          cpu_devs[:1],
+      )
+      self.assertEqual(
+          make_bm(
+              constants.Scope.CHIP, local_index=2, hardware_spec=v6e_spec
+          ).get_devices_for_scope(),
+          [cpu_devs[2]],
+      )
+
+    # 4. hardware_spec=None raises on Scope.CHIP, succeeds on DEVICE and HOST
+    with mock.patch.object(jax, "local_devices", return_value=tpu7x_devs):
+      self.assertEqual(
+          make_bm(
+              constants.Scope.DEVICE, hardware_spec=None
+          ).get_devices_for_scope(),
+          tpu7x_devs[:1],
+      )
+      self.assertEqual(
+          make_bm(
+              constants.Scope.HOST, hardware_spec=None
+          ).get_devices_for_scope(),
+          tpu7x_devs,
+      )
+      with self.assertRaisesRegex(
+          ValueError, "scope='chip' requires a non-None hardware_spec"
+      ):
+        make_bm(
+            constants.Scope.CHIP, hardware_spec=None
+        ).get_devices_for_scope()
+
+    # 5. Mismatched chip device count (len != devices_per_chip) raises
+    # ValueError.
+    incomplete_chip_devs = [
+        tpu7x_devs[0],
+        tpu7x_devs[1],
+        tpu7x_devs[2],  # chip (1, 0, 0) missing core 1
+    ]
+    with mock.patch.object(
+        jax, "local_devices", return_value=incomplete_chip_devs
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "has 1 local device\\(s\\), expected devices_per_chip=2"
+      ):
+        make_bm(constants.Scope.CHIP).get_devices_for_scope()
+
+    oversized_chip_devs = [
+        mock.MagicMock(id=i, coords=(0, 0, 0), core_on_chip=i) for i in range(3)
+    ]
+    with mock.patch.object(
+        jax, "local_devices", return_value=oversized_chip_devs
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "has 3 local device\\(s\\), expected devices_per_chip=2"
+      ):
+        make_bm(constants.Scope.CHIP).get_devices_for_scope()
+
+    # 6. Missing config.scope, empty local_devices, and unsupported scope
+    with mock.patch.object(jax, "local_devices", return_value=tpu7x_devs):
+      with self.assertRaises(AttributeError):
+        DummyBenchmark().get_devices_for_scope()
+
+      bm_bad_scope = make_bm(constants.Scope.DEVICE)
+      bm_bad_scope.config.scope = "rack"  # pyrefly: ignore[bad-assignment]
+      with self.assertRaisesRegex(ValueError, "Unsupported scope"):
+        bm_bad_scope.get_devices_for_scope()
+
+    with mock.patch.object(jax, "local_devices", return_value=[]):
+      with self.assertRaisesRegex(ValueError, "No local JAX devices available"):
+        make_bm(constants.Scope.DEVICE).get_devices_for_scope()
+
+  def test_scope_bandwidth_metrics_and_xprof_fallback(self):
+    """Tests scope_bandwidth_metrics derives smaller scopes and mirrors None on XProf fallback."""
+
+    @dataclasses.dataclass
+    class ScopedParams(base.ScopeParamsMixin, base.BaseBenchmarkParams):
+      scope: constants.Scope = constants.Scope.HOST
+
+    class ScopedBenchmark(DummyBenchmark):
+      derive_chip_bandwidth = False
+
+      def get_devices_to_measure(self) -> list[jax.Device]:
+        return self.get_devices_for_scope()
+
+      def calculate_throughput_metrics(
+          self, latency_ms: float, prefix: constants.TimingDomain
+      ):
+        del latency_ms
+        return self.scope_bandwidth_metrics(prefix, 240.0)
+
+    tpu7x_devs = [
+        mock.MagicMock(id=i, coords=(i // 2, 0, 0), core_on_chip=i % 2)
+        for i in range(8)
+    ]
+    v6e_devs = [
+        mock.MagicMock(id=i, coords=(i, 0, 0), core_on_chip=0) for i in range(8)
+    ]
+    with mock.patch.object(jax, "local_devices", return_value=tpu7x_devs):
+      # 1. tpu7x (devices_per_chip=2, 8 local devices)
+      bm_tpu7x_dev = ScopedBenchmark(
+          config=ScopedParams(scope=constants.Scope.DEVICE),
+          hardware_spec=system.TPU7X_HARDWARE_SPEC,
+      )
+      bm_tpu7x_chip = ScopedBenchmark(
+          config=ScopedParams(scope=constants.Scope.CHIP),
+          hardware_spec=system.TPU7X_HARDWARE_SPEC,
+      )
+      bm_tpu7x = ScopedBenchmark(
+          config=ScopedParams(scope=constants.Scope.HOST),
+          hardware_spec=system.TPU7X_HARDWARE_SPEC,
+      )
+      self.assertEqual(
+          bm_tpu7x_dev.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK,
+              50.0,
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": 50.0,
+              "wall_clock_bandwidth_per_chip_gb_s": None,
+              "wall_clock_bandwidth_per_host_gb_s": None,
+          },
+      )
+      self.assertEqual(
+          bm_tpu7x_chip.scope_bandwidth_metrics(
+              constants.TimingDomain.XPROF, 100.0
+          ),
+          {
+              "xprof_bandwidth_per_device_gb_s": 50.0,
+              "xprof_bandwidth_per_chip_gb_s": 100.0,
+              "xprof_bandwidth_per_host_gb_s": None,
+          },
+      )
+      self.assertEqual(
+          bm_tpu7x.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK, 240.0
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": 30.0,
+              "wall_clock_bandwidth_per_chip_gb_s": 60.0,
+              "wall_clock_bandwidth_per_host_gb_s": 240.0,
+          },
+      )
+
+      # 2. hardware_spec=None raises on CHIP, succeeds on DEVICE, and on HOST
+      # derives per_device while leaving per_chip None.
+      bm_no_spec_chip = ScopedBenchmark(
+          config=ScopedParams(scope=constants.Scope.CHIP),
+      )
+      bm_no_spec_chip.hardware_spec = None
+      with self.assertRaisesRegex(
+          ValueError, "scope='chip' requires a non-None hardware_spec"
+      ):
+        bm_no_spec_chip.scope_bandwidth_metrics(
+            constants.TimingDomain.WALL_CLOCK, 60.0
+        )
+      bm_no_spec_dev = ScopedBenchmark(
+          config=ScopedParams(scope=constants.Scope.DEVICE),
+      )
+      bm_no_spec_dev.hardware_spec = None
+      self.assertEqual(
+          bm_no_spec_dev.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK,
+              60.0,
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": 60.0,
+              "wall_clock_bandwidth_per_chip_gb_s": None,
+              "wall_clock_bandwidth_per_host_gb_s": None,
+          },
+      )
+
+      bm_no_spec_host = ScopedBenchmark(
+          config=ScopedParams(scope=constants.Scope.HOST),
+      )
+      bm_no_spec_host.hardware_spec = None
+      self.assertEqual(
+          bm_no_spec_host.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK, 240.0
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": 30.0,
+              "wall_clock_bandwidth_per_chip_gb_s": None,
+              "wall_clock_bandwidth_per_host_gb_s": 240.0,
+          },
+      )
+
+      # 3. None and float("inf") preservation
+      self.assertEqual(
+          bm_tpu7x.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK, None
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": None,
+              "wall_clock_bandwidth_per_chip_gb_s": None,
+              "wall_clock_bandwidth_per_host_gb_s": None,
+          },
+      )
+      self.assertEqual(
+          bm_tpu7x_chip.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK,
+              float("inf"),
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": float("inf"),
+              "wall_clock_bandwidth_per_chip_gb_s": float("inf"),
+              "wall_clock_bandwidth_per_host_gb_s": None,
+          },
+      )
+      self.assertEqual(
+          bm_tpu7x.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK,
+              float("inf"),
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": float("inf"),
+              "wall_clock_bandwidth_per_chip_gb_s": float("inf"),
+              "wall_clock_bandwidth_per_host_gb_s": float("inf"),
+          },
+      )
+
+      # 4. Config without scope raises AttributeError
+      with self.assertRaises(AttributeError):
+        DummyBenchmark().scope_bandwidth_metrics(
+            constants.TimingDomain.WALL_CLOCK, 10.0
+        )
+
+      # 5. Empty XProf durations fallback mirrors all three wall_clock scope
+      # keys to xprof_bandwidth_per_{device,chip,host}_gb_s = None.
+      wc_metrics = bm_tpu7x.calculate_metrics([10.0, 10.0])
+      # pylint: disable=protected-access
+      fallback_metrics, _ = bm_tpu7x._apply_xprof_timing_and_sync(
+          dict(wc_metrics)
+      )
+      self.assertEqual(
+          fallback_metrics["wall_clock_bandwidth_per_device_gb_s"], 30.0
+      )
+      self.assertEqual(
+          fallback_metrics["wall_clock_bandwidth_per_chip_gb_s"], 60.0
+      )
+      self.assertEqual(
+          fallback_metrics["wall_clock_bandwidth_per_host_gb_s"], 240.0
+      )
+      for s in constants.Scope:
+        key = f"xprof_bandwidth_per_{s.value}_gb_s"
+        self.assertIn(key, fallback_metrics)
+        self.assertIsNone(fallback_metrics[key])
+
+    # 6. v6e (devices_per_chip=1, 8 local devices)
+    with mock.patch.object(jax, "local_devices", return_value=v6e_devs):
+      bm_v6e = ScopedBenchmark(
+          config=ScopedParams(scope=constants.Scope.CHIP),
+          hardware_spec=system.V6E_HARDWARE_SPEC,
+      )
+      self.assertEqual(
+          bm_v6e.scope_bandwidth_metrics(
+              constants.TimingDomain.WALL_CLOCK, 60.0
+          ),
+          {
+              "wall_clock_bandwidth_per_device_gb_s": 60.0,
+              "wall_clock_bandwidth_per_chip_gb_s": 60.0,
+              "wall_clock_bandwidth_per_host_gb_s": None,
+          },
+      )
 
 
 if __name__ == "__main__":

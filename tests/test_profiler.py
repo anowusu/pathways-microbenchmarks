@@ -3,11 +3,23 @@
 import gzip
 import io
 import json
+import os
 from unittest import mock
 
 from absl.testing import absltest
 from accelerator_microbenchmarks.core import profiler
+
 import os
+
+
+def _parse_xprof_durations(
+    xprof_dir, is_xprof_op_fn=None, local_device_id=0
+) -> list[float]:
+  """Loads the trace in `xprof_dir` and parses `local_device_id` durations."""
+  trace = profiler.load_xprof_trace(xprof_dir, is_xprof_op_fn)
+  if trace is None:
+    return []
+  return trace.device_step_durations_ms(local_device_id)
 
 
 class ProfilerTest(absltest.TestCase):
@@ -22,7 +34,8 @@ class ProfilerTest(absltest.TestCase):
         ]
     }
     pid = profiler._get_target_pid(  # pylint: disable=protected-access
-        trace_data, local_device_id=None
+        profiler._get_process_pids(trace_data["traceEvents"]),  # pylint: disable=protected-access
+        local_device_id=None,
     )
     self.assertEqual(pid, 42)
 
@@ -35,12 +48,13 @@ class ProfilerTest(absltest.TestCase):
         ]
     }
     pid = profiler._get_target_pid(  # pylint: disable=protected-access
-        trace_data, local_device_id=0
+        profiler._get_process_pids(trace_data["traceEvents"]),  # pylint: disable=protected-access
+        local_device_id=0,
     )
     self.assertEqual(pid, 10)
 
   def test_calculate_step_durations_ms_sorts_out_of_order_bounding_events(self):
-    """Test that _calculate_step_durations_ms sorts bounding events chronologically."""
+    """Test that step spans are sorted chronologically before computing durations."""
     # Bounding events in non-chronological order: step 3, step 1, step 2
     all_events = [
         {"pid": 1, "name": "jit_step3", "ts": 30000, "dur": 5000},
@@ -53,19 +67,108 @@ class ProfilerTest(absltest.TestCase):
         {"pid": 1, "ts": 31000, "dur": 3000},  # Step 3: 3.0 ms
     ]
     durations = profiler._calculate_step_durations_ms(  # pylint: disable=protected-access
-        all_events=all_events,
-        candidate_events=candidate_events,
+        target_events=candidate_events,
+        step_spans=profiler._get_step_spans_by_pid(all_events)[1],  # pylint: disable=protected-access
         target_pid=1,
     )
     # Must be sorted chronologically: Step 1 (1.0 ms), Step 2 (2.0 ms), Step 3 (3.0 ms)
     self.assertEqual(durations, [1.0, 2.0, 3.0])
 
+  def test_calculate_step_durations_ms_prefers_device_ps_fields(self):
+    """Step bounds and ends come from `device_offset_ps`/`device_duration_ps`."""
+    all_events = [
+        # Corrupted timeline ts/dur (both at ts=1000, dur=0), distinct in ps.
+        {
+            "pid": 1,
+            "name": "jit_step1",
+            "ts": 1000,
+            "dur": 0,
+            "args": {
+                "device_offset_ps": 1_000_000_000,
+                "device_duration_ps": 1_500_000_000,
+            },
+        },
+        {
+            "pid": 1,
+            "name": "jit_step2",
+            "ts": 1000,
+            "dur": 0,
+            "args": {
+                "device_offset_ps": 3_000_000_000,
+                "device_duration_ps": 2_500_000_000,
+            },
+        },
+        # No ps fields: fall back to ts/dur.
+        {"pid": 1, "name": "jit_step3", "ts": 15000, "dur": 5000},
+    ]
+    candidate_events = [
+        {
+            "pid": 1,
+            "ts": 1000,
+            "dur": 0,
+            "args": {
+                "device_offset_ps": 1_100_000_000,
+                "device_duration_ps": 1_000_000_000,
+            },
+        },
+        {
+            "pid": 1,
+            "ts": 1000,
+            "dur": 0,
+            "args": {
+                "device_offset_ps": 3_100_000_000,
+                "device_duration_ps": 2_000_000_000,
+            },
+        },
+        {"pid": 1, "ts": 16000, "dur": 3000, "args": {}},
+    ]
+    durations = profiler._calculate_step_durations_ms(  # pylint: disable=protected-access
+        target_events=candidate_events,
+        step_spans=profiler._get_step_spans_by_pid(all_events)[1],  # pylint: disable=protected-access
+        target_pid=1,
+    )
+    self.assertEqual(durations, [1.0, 2.0, 3.0])
+
+  def test_event_span_us_requires_both_device_ps_fields(self):
+    """Start and duration always come from the same time base.
+
+    If only one of `device_offset_ps` / `device_duration_ps` is present the
+    event falls back to `ts`/`dur` entirely, never mixing a device start with
+    a host duration (or vice versa). A `device_duration_ps` of 0 is a valid
+    device value, not a missing one.
+    """
+    both = {
+        "ts": 10,
+        "dur": 20,
+        "args": {"device_offset_ps": 5_000_000, "device_duration_ps": 0},
+    }
+    offset_only = {"ts": 10, "dur": 20, "args": {"device_offset_ps": 5e6}}
+    duration_only = {"ts": 10, "dur": 20, "args": {"device_duration_ps": 7e6}}
+    neither = {"ts": 10, "dur": 20}
+    self.assertEqual(profiler._event_span_us(both), (5.0, 0.0))  # pylint: disable=protected-access
+    self.assertEqual(profiler._event_span_us(offset_only), (10.0, 20.0))  # pylint: disable=protected-access
+    self.assertEqual(profiler._event_span_us(duration_only), (10.0, 20.0))  # pylint: disable=protected-access
+    self.assertEqual(profiler._event_span_us(neither), (10.0, 20.0))  # pylint: disable=protected-access
+
+  def test_get_step_spans_by_pid_partial_device_ps_falls_back_to_ts_dur(self):
+    """A `jit_` step with only one device_* field uses its `ts`/`dur` span."""
+    events = [
+        {
+            "pid": 1,
+            "name": "jit_step1",
+            "ts": 1000,
+            "dur": 500,
+            "args": {"device_offset_ps": 9_000_000_000},
+        },
+    ]
+    spans = profiler._get_step_spans_by_pid(events)  # pylint: disable=protected-access
+    self.assertEqual(spans, {1: [(1000.0, 1500.0)]})
 
   @mock.patch.object(os, "walk")
   def test_parse_xprof_durations_no_trace(self, mock_walk):
     """Test parse_xprof_durations when no trace file is found."""
     mock_walk.return_value = [("/tmp", [], [])]
-    result = profiler.parse_xprof_durations("/tmp")
+    result = _parse_xprof_durations("/tmp")
     self.assertEqual(result, [])
 
   @mock.patch.object(os, "walk")
@@ -90,7 +193,7 @@ class ProfilerTest(absltest.TestCase):
 
     mock_open.return_value.__enter__.return_value = out
 
-    result = profiler.parse_xprof_durations("/tmp")
+    result = _parse_xprof_durations("/tmp")
     self.assertEqual(result, [])
 
   @mock.patch.object(os, "walk")
@@ -134,7 +237,7 @@ class ProfilerTest(absltest.TestCase):
 
     mock_open.return_value.__enter__.return_value = out
 
-    result = profiler.parse_xprof_durations("/tmp")
+    result = _parse_xprof_durations("/tmp")
     self.assertEqual(result, [1.0, 2.0])
 
   @mock.patch.object(os, "walk")
@@ -193,7 +296,7 @@ class ProfilerTest(absltest.TestCase):
 
     mock_open.return_value.__enter__.return_value = out
 
-    result = profiler.parse_xprof_durations("/tmp", local_device_id=0)
+    result = _parse_xprof_durations("/tmp", local_device_id=0)
     # Should take durations for active device PID 1: [1000 us -> 1.0 ms, 2000 us -> 2.0 ms]
     self.assertEqual(result, [1.0, 2.0])
 
@@ -259,7 +362,7 @@ class ProfilerTest(absltest.TestCase):
     out.seek(0)
     mock_open.return_value.__enter__.return_value = out
 
-    result = profiler.parse_xprof_durations("/tmp", local_device_id=0)
+    result = _parse_xprof_durations("/tmp", local_device_id=0)
     # Step 1 span: earliest start=1500, latest end=4500 -> (4500-1500)/1000 = 3.0 ms
     # Step 2 span: earliest start=11000, latest end=13000 -> (13000-11000)/1000 = 2.0 ms
     self.assertEqual(result, [3.0, 2.0])
@@ -319,7 +422,7 @@ class ProfilerTest(absltest.TestCase):
     out.seek(0)
     mock_open.return_value.__enter__.return_value = out
 
-    result = profiler.parse_xprof_durations("/tmp", local_device_id=0)
+    result = _parse_xprof_durations("/tmp", local_device_id=0)
     # Output must be ordered chronologically by step time: [1.0 ms (step 1), 2.0 ms (step 2)]
     self.assertEqual(result, [1.0, 2.0])
 
@@ -378,7 +481,7 @@ class ProfilerTest(absltest.TestCase):
     out.seek(0)
     mock_open.return_value.__enter__.return_value = out
 
-    result = profiler.parse_xprof_durations("/tmp", local_device_id=None)
+    result = _parse_xprof_durations("/tmp", local_device_id=None)
     # 1200 us = 1.2 ms; 2500000000 ps = 2.5 ms
     self.assertEqual(result, [1.2, 2.5])
 
@@ -424,7 +527,7 @@ class ProfilerTest(absltest.TestCase):
     out.seek(0)
     mock_open.return_value.__enter__.return_value = out
 
-    result = profiler.parse_xprof_durations("/tmp", local_device_id=0)
+    result = _parse_xprof_durations("/tmp", local_device_id=0)
     # Only call-done event duration (150 us = 0.15 ms) should be captured
     self.assertAlmostEqual(result[0], 0.15)
     self.assertLen(result, 1)
@@ -466,10 +569,169 @@ class ProfilerTest(absltest.TestCase):
     def match_fn(e):
       return e.get("args", {}).get("hlo_category", "") == "convolution fusion"
 
-    result = profiler.parse_xprof_durations(
+    result = _parse_xprof_durations(
         "/tmp", is_xprof_op_fn=match_fn, local_device_id=0
     )
     self.assertEqual(result, [0.75])
+
+  def test_load_once_and_slice_real_trace_per_device(self):
+    """Pins PID resolution on a real .json.gz: per-device split, first process_name wins, missing TPU falls back to /host:CPU."""
+
+    def process(pid, name):
+      return {"pid": pid, "name": "process_name", "args": {"name": name}}
+
+    def marker(pid, dur_us):
+      return {
+          "pid": pid,
+          "name": f"{profiler.MARKER}_op",
+          "ts": 0,
+          "dur": dur_us,
+      }
+
+    trace_dir = self.create_tempdir().full_path
+    with gzip.open(os.path.join(trace_dir, "host.trace.json.gz"), "wt") as f:
+      json.dump(
+          {
+              "traceEvents": [
+                  process(1, "/device:TPU:0"),
+                  process(2, "/device:TPU:1"),
+                  process(3, "/host:CPU"),
+                  process(9, "/device:TPU:0"),  # Duplicate: ignored.
+                  marker(1, 1000),
+                  marker(2, 2000),
+                  marker(3, 3000),
+                  marker(9, 9000),
+              ]
+          },
+          f,
+      )
+
+    trace = profiler.load_xprof_trace(trace_dir)
+    self.assertIsNotNone(trace)
+    self.assertEqual(trace.device_step_durations_ms(0), [1.0])
+    self.assertEqual(trace.device_step_durations_ms(1), [2.0])
+    self.assertEqual(trace.device_step_durations_ms(None), [3.0])
+    # No /device:TPU:5 process: falls back to the /host:CPU PID.
+    self.assertEqual(trace.device_step_durations_ms(5), [3.0])
+
+  def _write_trace(self, events) -> str:
+    trace_dir = self.create_tempdir().full_path
+    with gzip.open(os.path.join(trace_dir, "host.trace.json.gz"), "wt") as f:
+      json.dump({"traceEvents": events}, f)
+    return trace_dir
+
+  def test_equal_start_step_spans_keep_trace_order(self):
+    """Verifies `jit_` steps with equal start times keep their trace order."""
+    trace = profiler.load_xprof_trace(
+        self._write_trace([
+            {
+                "pid": 1,
+                "name": "process_name",
+                "args": {"name": "/device:TPU:0"},
+            },
+            # Same start: the longer step comes first in the trace.
+            {"pid": 1, "name": "jit_long", "ts": 0, "dur": 1000},
+            {"pid": 1, "name": "jit_short", "ts": 0, "dur": 100},
+            {"pid": 1, "name": f"{profiler.MARKER}_op", "ts": 50, "dur": 10},
+            {"pid": 1, "name": f"{profiler.MARKER}_op", "ts": 500, "dur": 20},
+        ])
+    )
+    self.assertEqual(
+        trace.step_spans_by_pid, {1: [(0.0, 1000.0), (0.0, 100.0)]}
+    )
+    # jit_long spans both markers (50 -> 520 us), jit_short only the first.
+    self.assertEqual(trace.device_step_durations_ms(0), [0.47, 0.01])
+
+  def test_jit_ops_on_xla_ops_line_are_not_step_spans(self):
+    """Only `XLA Modules` `jit_*` events are steps when that line exists.
+
+    Mirrors an MLA decode trace: a Pallas kernel nested in a `jax.jit` emits
+    `jit_*`-named scalar-prefetch ops on the `XLA Ops` line, and a timed
+    kernel starts inside one of them. Pid 2 has no `XLA Modules` line, so it
+    keeps using every `jit_*` event.
+    """
+
+    def thread(pid, tid, name):
+      return {
+          "ph": "M",
+          "pid": pid,
+          "tid": tid,
+          "name": "thread_name",
+          "args": {"name": name},
+      }
+
+    def event(pid, tid, name, ts, dur):
+      return {
+          "ph": "X",
+          "pid": pid,
+          "tid": tid,
+          "name": name,
+          "ts": ts,
+          "dur": dur,
+      }
+
+    trace = profiler.load_xprof_trace(
+        self._write_trace([
+            {
+                "pid": 1,
+                "name": "process_name",
+                "args": {"name": "/device:TPU:0"},
+            },
+            {
+                "pid": 2,
+                "name": "process_name",
+                "args": {"name": "/device:TPU:1"},
+            },
+            thread(1, 10, "XLA Modules"),
+            thread(1, 11, "XLA Ops"),
+            # One step on pid 1, with two kernels (2 us and 1 us).
+            event(1, 10, "jit__local(123)", 100, 50),
+            event(1, 11, "jit_kernel_.1.ids_ref", 110, 1),
+            event(1, 11, "KERNEL-a.1", 111, 2),
+            event(1, 11, "jit_kernel_.2.ids_ref", 120, 1),
+            event(1, 11, "KERNEL-b.1", 120, 1),
+            # Pid 2 without thread metadata: both jit_* events are steps.
+            event(2, 20, "jit_step", 100, 50),
+            event(2, 20, "jit_inner", 110, 1),
+            event(2, 20, "KERNEL-c.1", 110, 1),
+        ]),
+        lambda e: e.get("name", "").startswith("KERNEL-"),
+    )
+    self.assertEqual(
+        trace.step_spans_by_pid,
+        {1: [(100.0, 150.0)], 2: [(100.0, 150.0), (110.0, 111.0)]},
+    )
+    # One duration per step: earliest kernel start to latest kernel end.
+    self.assertEqual(trace.device_step_durations_ms(0), [0.01])
+    self.assertEqual(trace.device_step_durations_ms(1), [0.001, 0.001])
+
+  def test_candidate_selection_is_global_across_pids(self):
+    """Verifies call-done markers on one pid suppress plain markers on others."""
+    trace = profiler.load_xprof_trace(
+        self._write_trace([
+            {
+                "pid": 1,
+                "name": "process_name",
+                "args": {"name": "/device:TPU:0"},
+            },
+            {
+                "pid": 2,
+                "name": "process_name",
+                "args": {"name": "/device:TPU:1"},
+            },
+            {
+                "pid": 1,
+                "name": f"{profiler.MARKER}_op-call-done",
+                "ts": 0,
+                "dur": 150,
+            },
+            {"pid": 2, "name": f"{profiler.MARKER}_op", "ts": 0, "dur": 900},
+        ])
+    )
+    self.assertEqual(list(trace.timing_events_by_pid), [1])
+    self.assertEqual(trace.fallback_pid, 1)
+    self.assertEqual(trace.device_step_durations_ms(0), [0.15])
+    self.assertEqual(trace.device_step_durations_ms(1), [])
 
 
 if __name__ == "__main__":

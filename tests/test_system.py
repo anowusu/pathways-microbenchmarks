@@ -122,8 +122,8 @@ class SystemTest(absltest.TestCase):
     package_dir = os.path.dirname(schema.__file__)
     discovered = {
         module_name
-        for _, module_name, _ in pkgutil.iter_modules([package_dir])
-        if module_name not in _INFRASTRUCTURE_MODULES
+        for _, module_name, is_pkg in pkgutil.iter_modules([package_dir])
+        if not is_pkg and module_name not in _INFRASTRUCTURE_MODULES
     }
     self.assertNotEmpty(discovered)
     self.assertContainsSubset(
@@ -185,7 +185,7 @@ class SystemTest(absltest.TestCase):
     self.assertEqual(
         hw_spec.tflops.peak_tflops_per_device["bfloat16"], 1153.5
     )
-    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["float32"], 576.75)
+    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["float32"], 1153.5)
     self.assertEqual(
         hw_spec.tflops.peak_tflops_per_device["float8_e5m2"], 2307.0
     )
@@ -199,6 +199,9 @@ class SystemTest(absltest.TestCase):
     self.assertEqual(
         hw_spec.ici.wraparound_rule, system.WraparoundRule.ALL_DIMS_GE_4
     )
+
+    # PCIe Gen5 x16 host link per chip (raw).
+    self.assertEqual(hw_spec.pcie.bandwidth_per_direction_gb_s, 64.0)
 
     # Test HBM stats
     self.assertEqual(hw_spec.hbm.peak_bw_gb_s, 7380.0)
@@ -215,7 +218,7 @@ class SystemTest(absltest.TestCase):
     self.assertEqual(
         hw_spec.tflops.peak_tflops_per_device["bfloat16"], 918.0
     )
-    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["float32"], 459.0)
+    self.assertEqual(hw_spec.tflops.peak_tflops_per_device["float32"], 918.0)
     self.assertEqual(
         hw_spec.tflops.peak_tflops_per_device["float8_e5m2"], 918.0
     )
@@ -230,6 +233,9 @@ class SystemTest(absltest.TestCase):
     self.assertEqual(
         hw_spec.ici.wraparound_rule, system.WraparoundRule.PER_DIM_GE_16
     )
+
+    # PCIe Gen5 x8 host link per chip (raw).
+    self.assertEqual(hw_spec.pcie.bandwidth_per_direction_gb_s, 32.0)
 
     # Test HBM stats
     self.assertEqual(hw_spec.hbm.peak_bw_gb_s, 1638.4)

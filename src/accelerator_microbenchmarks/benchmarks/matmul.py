@@ -7,16 +7,23 @@ from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import checksum
 from accelerator_microbenchmarks.core import config
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import dtypes
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import report
-from accelerator_microbenchmarks.core import utils
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+# Unquantized floating-point dtypes supported for inputs and outputs.
+_UNQUANTIZED_FLOAT_DTYPES = (
+    jnp.bfloat16,
+    jnp.float32,
+)
 
 
 @dataclasses.dataclass
-class GemmParams(base.BaseBenchmarkParams):
-  """Configuration parameters for GEMM benchmark."""
+class MatmulShapeParams(base.BaseBenchmarkParams):
+  """Shared matrix shape, dtype, and seed parameters for GEMM benchmarks."""
 
   m: int = dataclasses.field(
       default=1024,
@@ -39,23 +46,28 @@ class GemmParams(base.BaseBenchmarkParams):
           "help": "Matrix dimension N (columns of operand B / output C).",
       },
   )
-  in_dtype: str = base.dtype_field(
-      default="bfloat16",
+  in_dtype: dtypes.DType = base.dtype_field(
+      default=dtypes.DType.BFLOAT16,
       metadata={
           "help": "Input operand data type (e.g. float8_e4m3fn, bfloat16)."
       },
   )
-  out_dtype: str = base.dtype_field(
-      default="bfloat16",
+  out_dtype: dtypes.DType = base.dtype_field(
+      default=dtypes.DType.BFLOAT16,
       metadata={
           "help": "Output accumulation/result data type (e.g. bfloat16)."
       },
   )
-
   seed: int = dataclasses.field(
       default=0,
       metadata={"min": 0, "help": "Random seed for tensor initialization."},
   )
+
+
+@dataclasses.dataclass
+class GemmParams(MatmulShapeParams):
+  """Configuration parameters for GEMM benchmark."""
+
   use_scaling_factors: bool = dataclasses.field(
       default=False,
       metadata={"help": "Apply row-wise/column-wise FP8 scaling factors."},
@@ -80,6 +92,12 @@ class GemmParams(base.BaseBenchmarkParams):
 
 
 TGemmConfig = TypeVar("TGemmConfig", bound=base.BaseBenchmarkParams)
+TGemmParams = TypeVar("TGemmParams", bound=GemmParams)
+
+
+def _sample_normal(key: jax.Array, shape: tuple[int, ...], dtype: Any):
+  """Module-level so `jax.jit` reuses its compile cache across calls."""
+  return jax.random.normal(key, shape).astype(dtype)
 
 
 class BaseGemmBenchmark(base.BaseBenchmark[TGemmConfig]):
@@ -127,15 +145,40 @@ class BaseGemmBenchmark(base.BaseBenchmark[TGemmConfig]):
         f"{prefix}_tflops_per_device": tflops_per_sec,
     }
 
+  def _replicated_normal(
+      self, key: jax.Array, shape: tuple[int, ...], dtype: Any
+  ) -> jax.Array:
+    """Samples a normal array replicated on every mesh device.
+
+    Generating under `jit` with a replicated `out_shardings` (as in `hbm.py`)
+    produces each shard on its own device, and the key is passed as a host
+    array, so no data moves between devices. The result equals eager sampling
+    with the same key.
+    """
+    # Replicated sharding for computation ops to avoid discrepancies
+    if self.mesh is None:
+      raise ValueError("Mesh not initialized.")
+    replicated_sharding = jax.sharding.NamedSharding(
+        self.mesh, jax.sharding.PartitionSpec(None, None)
+    )
+    generate = jax.jit(
+        _sample_normal,
+        static_argnums=(1, 2),
+        out_shardings=replicated_sharding,
+    )
+    return generate(np.asarray(key), shape, dtype)
+
 
 @registry.benchmark_registry.register("gemm", aliases=["gemm_generalized"])
-class GeneralizedGemmBenchmark(BaseGemmBenchmark[GemmParams]):
+class GeneralizedGemmBenchmark(BaseGemmBenchmark[TGemmParams]):
   """Generalized GEMM benchmark supporting FP8 and throughput projection.
 
   Pseudo-code: OUT = matmul(IN0, IN1) * rescaling_factor
   """
 
   Config = GemmParams
+  # Per-device GEMM on replicated inputs; no inter-device (ICI) traffic.
+  requires_ici: bool = False
   REPORT_SCHEMA: Sequence[tuple[str, Callable[[Any], str]]] = (
       ("in_dtype", report.format_str),
       ("out_dtype", report.format_str),
@@ -155,7 +198,7 @@ class GeneralizedGemmBenchmark(BaseGemmBenchmark[GemmParams]):
   )
 
   def setup(self):
-    out_dtype = utils.parse_dtype(self.config.out_dtype)
+    out_dtype = dtypes.parse_dtype(self.config.out_dtype)
     alpha = self.config.alpha
     beta = self.config.beta
 
@@ -214,7 +257,7 @@ class GeneralizedGemmBenchmark(BaseGemmBenchmark[GemmParams]):
     )
 
     # Resolve dtypes
-    in_dtype = utils.parse_dtype(self.config.in_dtype)
+    in_dtype = dtypes.parse_dtype(self.config.in_dtype)
 
     key = jax.random.PRNGKey(self.config.seed)
     k1, k2, k3, k4, k5 = jax.random.split(key, 5)
@@ -224,52 +267,37 @@ class GeneralizedGemmBenchmark(BaseGemmBenchmark[GemmParams]):
     # dtypes aren't supported
     a_shape = (k, m) if transpose_a else (m, k)
     b_shape = (n, k) if transpose_b else (k, n)
-    a = jax.random.normal(k1, a_shape).astype(in_dtype)
-    b = jax.random.normal(k2, b_shape).astype(in_dtype)
+    a = self._replicated_normal(k1, a_shape, in_dtype)
+    b = self._replicated_normal(k2, b_shape, in_dtype)
 
     # Optional scaling factors
     use_sf = self.config.use_scaling_factors
-    sf0 = jax.random.normal(k3, (m, 1)).astype(jnp.float32) if use_sf else None
-    sf1 = jax.random.normal(k4, (1, n)).astype(jnp.float32) if use_sf else None
+    sf0 = self._replicated_normal(k3, (m, 1), jnp.float32) if use_sf else None
+    sf1 = self._replicated_normal(k4, (1, n), jnp.float32) if use_sf else None
 
     use_accumulator_matrix = True if self.config.beta != 0.0 else False
     c = (
-        jax.random.normal(k5, (m, n)).astype(in_dtype)
+        self._replicated_normal(k5, (m, n), in_dtype)
         if use_accumulator_matrix
         else None
-    )
-
-    # Replicated sharding for computation ops to avoid discrepancies
-    if self.mesh is None:
-      raise ValueError("Mesh not initialized.")
-    replicated_sharding = jax.sharding.NamedSharding(
-        self.mesh, jax.sharding.PartitionSpec(None, None)
     )
 
     # Row and column scaling factor vectors (sf0: m x 1, sf1: 1 x n)
     # Unpacked as sf0, sf1 args into gemm_fn(a, b, sf0, sf1, c) if enabled,
     # else (None, None).
     if use_sf:
-      sf_args = [
-          jax.device_put(sf0, replicated_sharding),
-          jax.device_put(sf1, replicated_sharding),
-      ]
+      sf_args = [sf0, sf1]
     else:
       sf_args = [None, None]
 
     # Accumulator matrix C (M x N) for fused GEMM addition when beta != 0.0.
     # Unpacked as c arg into gemm_fn(a, b, sf0, sf1, c) if enabled, else [].
     if use_accumulator_matrix:
-      acc_args = [jax.device_put(c, replicated_sharding)]
+      acc_args = [c]
     else:
       acc_args = []
 
-    return (
-        jax.device_put(a, replicated_sharding),
-        jax.device_put(b, replicated_sharding),
-        *sf_args,
-        *acc_args,
-    )
+    return (a, b, *sf_args, *acc_args)
 
   def run_op(self, *args) -> jnp.ndarray:
     if self._jit_fn is None:
@@ -282,8 +310,8 @@ class GeneralizedGemmBenchmark(BaseGemmBenchmark[GemmParams]):
 
   def get_total_bytes(self) -> float:
     m, k, n = self.config.m, self.config.k, self.config.n
-    in_itemsize = jnp.dtype(utils.parse_dtype(self.config.in_dtype)).itemsize
-    out_itemsize = jnp.dtype(utils.parse_dtype(self.config.out_dtype)).itemsize
+    in_itemsize = jnp.dtype(dtypes.parse_dtype(self.config.in_dtype)).itemsize
+    out_itemsize = jnp.dtype(dtypes.parse_dtype(self.config.out_dtype)).itemsize
 
     # Base memory traffic: Load A (M x K) and B (K x N), Store Out (M x N)
     bytes_a = m * k * in_itemsize
@@ -319,77 +347,60 @@ class GemmThrottlingParams(config.SoakingExecutionParamsMixin, GemmParams):
   """
 
 
+_SOAKING_THERMAL_REPORT_COLUMNS: tuple[
+    tuple[str, Callable[[Any], str]], ...
+] = (
+    (
+        (constants.WALL_CLOCK_PRE_SOAKING_P50_MS, report.format_4f),
+        (constants.WALL_CLOCK_POST_SOAKING_P50_MS, report.format_4f),
+        (constants.WALL_CLOCK_SLOWDOWN_RATIO, report.format_2f),
+        (
+            constants.WALL_CLOCK_PRE_SOAKING_TFLOPS_PER_DEVICE,
+            report.format_2f,
+        ),
+        (
+            constants.WALL_CLOCK_POST_SOAKING_TFLOPS_PER_DEVICE,
+            report.format_2f,
+        ),
+        (constants.XPROF_PRE_SOAKING_P50_MS, report.format_4f),
+        (constants.XPROF_POST_SOAKING_P50_MS, report.format_4f),
+        (constants.XPROF_SLOWDOWN_RATIO, report.format_2f),
+        (constants.XPROF_PRE_SOAKING_TFLOPS_PER_DEVICE, report.format_2f),
+        (constants.XPROF_POST_SOAKING_TFLOPS_PER_DEVICE, report.format_2f),
+    )
+    + tuple(
+        (k, report.format_2f) for k in constants.THERMAL_PRE_SOAKING_METRIC_KEYS
+    )
+    + tuple(
+        (k, report.format_2f)
+        for k in constants.THERMAL_METRIC_KEYS
+        if k != constants.PEAK_TEMP_SOURCE
+    )
+    + (
+        (constants.PEAK_TEMP_SOURCE, report.format_str),
+        (constants.PSTATE_REQUESTED, report.format_str),
+    )
+)
+
+
 @registry.benchmark_registry.register("gemm_throttling", is_experimental=True)
-class GemmThrottlingBenchmark(GeneralizedGemmBenchmark):
+class GemmThrottlingBenchmark(GeneralizedGemmBenchmark[GemmThrottlingParams]):
   """[EXPERIMENTAL] GEMM throttling benchmark with 3-phase soaking execution and XProf thermal metrics."""
 
   Config = GemmThrottlingParams
   REPORT_SCHEMA: Sequence[tuple[str, Callable[[Any], str]]] = (
       tuple(GeneralizedGemmBenchmark.REPORT_SCHEMA)
-      + (
-          (constants.WALL_CLOCK_PRE_SOAKING_P50_MS, report.format_4f),
-          (constants.WALL_CLOCK_POST_SOAKING_P50_MS, report.format_4f),
-          (constants.WALL_CLOCK_SLOWDOWN_RATIO, report.format_2f),
-          (
-              constants.WALL_CLOCK_PRE_SOAKING_TFLOPS_PER_DEVICE,
-              report.format_2f,
-          ),
-          (
-              constants.WALL_CLOCK_POST_SOAKING_TFLOPS_PER_DEVICE,
-              report.format_2f,
-          ),
-          (constants.XPROF_PRE_SOAKING_P50_MS, report.format_4f),
-          (constants.XPROF_POST_SOAKING_P50_MS, report.format_4f),
-          (constants.XPROF_SLOWDOWN_RATIO, report.format_2f),
-          (constants.XPROF_PRE_SOAKING_TFLOPS_PER_DEVICE, report.format_2f),
-          (constants.XPROF_POST_SOAKING_TFLOPS_PER_DEVICE, report.format_2f),
-      )
-      + tuple(
-          (k, report.format_2f)
-          for k in constants.THERMAL_PRE_SOAKING_METRIC_KEYS
-      )
-      + tuple(
-          (k, report.format_2f)
-          for k in constants.THERMAL_METRIC_KEYS
-          if k != constants.PEAK_TEMP_SOURCE
-      )
-      + (
-          (constants.PEAK_TEMP_SOURCE, report.format_str),
-          (constants.PSTATE_REQUESTED, report.format_str),
-      )
+      + _SOAKING_THERMAL_REPORT_COLUMNS
   )
 
-  def derive_chip_metrics(self, metrics: dict[str, Any]) -> dict[str, Any]:
-    metrics = super().derive_chip_metrics(metrics)
-    total_flops = self.get_total_flops()
 
-    for domain in (
-        constants.TimingDomain.WALL_CLOCK,
-        constants.TimingDomain.XPROF,
-    ):
-      pre_ms = metrics.get(f"{domain}_{constants.PRE_SOAKING_P50_MS}")
-      if pre_ms is not None:
-        pre_tflops = (
-            (total_flops / (pre_ms / 1000.0)) / 1e12
-            if pre_ms > 0
-            else float("inf")
-        )
-        metrics[f"{domain}_{constants.PRE_SOAKING}_tflops_per_device"] = (
-            pre_tflops
-        )
-
-      post_ms = metrics.get(f"{domain}_{constants.POST_SOAKING_P50_MS}")
-      if post_ms is not None:
-        post_tflops = (
-            (total_flops / (post_ms / 1000.0)) / 1e12
-            if post_ms > 0
-            else float("inf")
-        )
-        metrics[f"{domain}_{constants.POST_SOAKING}_tflops_per_device"] = (
-            post_tflops
-        )
-
-    return metrics
+# Dtypes of the chained GEMM's X and B: the floats whose bit width the checksum
+# supports (checksum.SUPPORTED_BITS), so float64 and float4_e2m1fn are excluded.
+_CHAIN_DTYPES = tuple(
+    d.jnp_dtype.type
+    for d in dtypes.dtypes_matching(jnp.floating)
+    if checksum.is_checksummable_dtype(d.jnp_dtype)
+)
 
 
 @dataclasses.dataclass
@@ -400,11 +411,11 @@ class GemmChainedParams(base.BaseBenchmarkParams):
   a square K x K matrix, so there is no separate N.
   """
 
-  # Integer dtypes are rejected: B ~ N(0, 1) / sqrt(k) truncates to all zeros,
-  # so the chain collapses to 0 and every device trivially matches.
+  # Floats only (see _CHAIN_DTYPES): integer B ~ N(0, 1) / sqrt(k) truncates to
+  # all zeros, so the chain collapses to 0 and every device trivially matches.
   DTYPE_CONSTRAINTS = {
-      "in_dtype": (jnp.floating,),
-      "out_dtype": (jnp.floating,),
+      "in_dtype": _CHAIN_DTYPES,
+      "out_dtype": _CHAIN_DTYPES,
   }
 
   # Overrides the inherited field, which keeps its place in the field order.
@@ -436,8 +447,8 @@ class GemmChainedParams(base.BaseBenchmarkParams):
           "help": "Matrix dimension K (columns of X; B is K x K).",
       },
   )
-  in_dtype: str = base.dtype_field(
-      default="bfloat16",
+  in_dtype: dtypes.DType = base.dtype_field(
+      default=dtypes.DType.BFLOAT16,
       metadata={
           "help": (
               "Input operand data type of each matmul (e.g. float8_e4m3fn,"
@@ -445,8 +456,8 @@ class GemmChainedParams(base.BaseBenchmarkParams):
           )
       },
   )
-  out_dtype: str = base.dtype_field(
-      default="bfloat16",
+  out_dtype: dtypes.DType = base.dtype_field(
+      default=dtypes.DType.BFLOAT16,
       metadata={"help": "Data type of X after each matmul (e.g. bfloat16)."},
   )
   seed: int = dataclasses.field(
@@ -460,17 +471,6 @@ class GemmChainedParams(base.BaseBenchmarkParams):
           "help": "Number of sequential matrix multiplications in the chain.",
       },
   )
-
-  def __post_init__(self):
-    super().__post_init__()
-    for name in ("in_dtype", "out_dtype"):
-      dtype_str = getattr(self, name)
-      # The element width must be supported by the checksum.
-      if not checksum.is_checksummable_dtype(utils.parse_dtype(dtype_str)):
-        raise ValueError(
-            f"gemm_chained requires a {name} with a bit width in"
-            f" {checksum.SUPPORTED_BITS}, got {dtype_str!r}."
-        )
 
 
 def make_inputs_fn(
@@ -544,12 +544,17 @@ def make_chain_fn(
   return chain_fn
 
 
+TGemmChainedConfig = TypeVar("TGemmChainedConfig", bound=GemmChainedParams)
+
+
 @registry.benchmark_registry.register("gemm_chained", is_experimental=True)
-class GemmChainedBenchmark(BaseGemmBenchmark[GemmChainedParams]):
+class GemmChainedBenchmark(BaseGemmBenchmark[TGemmChainedConfig]):
   """[EXPERIMENTAL] Chained GEMM determinism benchmark with cross-host per-device checksum comparison."""
 
   # Runtime: the params dataclass the CLI / YAML loader instantiates.
   Config = GemmChainedParams
+  # Per-device chained GEMM with host-side checksum comparison; no ICI.
+  requires_ici: bool = False
   REPORT_SCHEMA: Sequence[tuple[str, Callable[[Any], str]]] = (
       ("in_dtype", report.format_str),
       ("out_dtype", report.format_str),
@@ -576,8 +581,8 @@ class GemmChainedBenchmark(BaseGemmBenchmark[GemmChainedParams]):
   def setup(self):
     if self.mesh is None:
       raise ValueError("Mesh not initialized.")
-    in_dtype = utils.parse_dtype(self.config.in_dtype)
-    out_dtype = utils.parse_dtype(self.config.out_dtype)
+    in_dtype = dtypes.parse_dtype(self.config.in_dtype)
+    out_dtype = dtypes.parse_dtype(self.config.out_dtype)
     self._jit_fn = make_chain_fn(
         mesh=self.mesh,
         chain_length=self.config.chain_length,
@@ -601,7 +606,7 @@ class GemmChainedBenchmark(BaseGemmBenchmark[GemmChainedParams]):
         mesh=self.mesh,
         m=self.config.m,
         k=self.config.k,
-        in_dtype=utils.parse_dtype(self.config.in_dtype),
+        in_dtype=dtypes.parse_dtype(self.config.in_dtype),
         seed=self.config.seed,
     )
     return inputs_fn()
@@ -625,8 +630,8 @@ class GemmChainedBenchmark(BaseGemmBenchmark[GemmChainedParams]):
 
   def get_total_bytes(self) -> float:
     m, k = self.config.m, self.config.k
-    in_itemsize = jnp.dtype(utils.parse_dtype(self.config.in_dtype)).itemsize
-    out_itemsize = jnp.dtype(utils.parse_dtype(self.config.out_dtype)).itemsize
+    in_itemsize = jnp.dtype(dtypes.parse_dtype(self.config.in_dtype)).itemsize
+    out_itemsize = jnp.dtype(dtypes.parse_dtype(self.config.out_dtype)).itemsize
     # Per step: load X (M x K) and B (K x K), store X (M x K).
     step_bytes = (m * k + k * k) * in_itemsize + m * k * out_itemsize
     return float(self.config.chain_length * step_bytes)
@@ -647,3 +652,309 @@ class GemmChainedBenchmark(BaseGemmBenchmark[GemmChainedParams]):
         checksum.gather_and_compare_checksums(self._local_runs, self.mesh)
     )
     return metrics
+
+
+@dataclasses.dataclass
+class GemmPulseParams(config.PulseExecutionParamsMixin, GemmChainedParams):
+  """Configuration parameters for multi-cycle chained GEMM pulse benchmark."""
+
+  min_duration_s: float = dataclasses.field(
+      default=0.0,
+      metadata={
+          "min": 0.0,
+          "help": (
+              "Minimum total duration in seconds of the untraced middle"
+              " soaking phase between pre_soaking_window and"
+              " post_soaking_window (>= 0.0)."
+          ),
+      },
+  )
+  enable_checksum: bool = dataclasses.field(
+      default=True,
+      metadata={
+          "help": "Compute and verify per-device 64-bit checksums per window.",
+      },
+  )
+
+
+@registry.benchmark_registry.register("gemm_pulse", is_experimental=True)
+class GemmPulseBenchmark(GemmChainedBenchmark[GemmPulseParams]):
+  """[EXPERIMENTAL] Chained GEMM multi-cycle determinism and pulse benchmark."""
+
+  Config = GemmPulseParams
+  REPORT_SCHEMA: Sequence[tuple[str, Callable[[Any], str]]] = (
+      tuple(GemmChainedBenchmark.REPORT_SCHEMA)
+      + (
+          ("num_cycles", report.format_str),
+          ("idle_s", report.format_str),
+          ("enable_checksum", report.format_str),
+      )
+      + _SOAKING_THERMAL_REPORT_COLUMNS
+  )
+
+  def get_run_identifier(self) -> str:
+    return (
+        f"{super().get_run_identifier()}_cycles_{self.config.num_cycles}_"
+        f"idle_{self.config.idle_s}_dur_{self.config.min_duration_s}_"
+        f"checksum_{self.config.enable_checksum}"
+    )
+
+  def post_run_processing(self, outputs: jax.Array, run_index: int) -> None:
+    if self.config.enable_checksum:
+      super().post_run_processing(outputs, run_index)
+
+  def calculate_metrics(self, times_ms: list[float]) -> dict[str, Any]:
+    if self.config.enable_checksum:
+      return super().calculate_metrics(times_ms)
+    return super(GemmChainedBenchmark, self).calculate_metrics(times_ms)
+
+
+class QuantScaling(constants.ParamEnum):
+  """Calibration method used to derive the quantization scaling factors.
+
+  Attributes:
+    DYNAMIC: Scales are computed on the fly from the absolute maximum of each
+      row or column (`scale = amax / Q_MAX`).
+    STATIC: Uses a fixed, compile-time clip bound `0.5 * Q_MAX` (`scale = 0.5`)
+      with no `amax` reduction. A non-unit (`!= 1.0`) power-of-2 scale prevents
+      XLA from folding away the scale/dequantize multiplications as identity
+      no-ops while scaling inputs without mantissa rounding loss.
+  """
+
+  DYNAMIC = "dynamic"
+  STATIC = "static"
+
+
+def _quantize_per_channel(
+    x: jax.Array,
+    *,
+    reduce_axis: int,
+    quant_dtype: jax.typing.DTypeLike,
+    scaling: QuantScaling,
+) -> tuple[jax.Array, jax.Array]:
+  """Quantizes `x` per channel along `reduce_axis`."""
+  q_dtype = jnp.dtype(quant_dtype)
+  q_max = float(dtypes.get_dtype_max(q_dtype))
+  x_f32 = x.astype(jnp.float32)
+
+  if scaling == QuantScaling.STATIC:
+    scale_shape = list(x.shape)
+    scale_shape[reduce_axis] = 1
+    # Use a non-unit power-of-2 bound (`0.5 * q_max` -> `scale = 0.5`) so XLA
+    # cannot elide `x * inv_scale` or `acc * (sf_a * sf_b)` as multiply-by-1
+    # no-ops.
+    static_absmax = 0.5 * q_max
+    scale_f32 = jnp.full(scale_shape, static_absmax / q_max, dtype=jnp.float32)
+    inv_scale_f32 = jnp.reciprocal(scale_f32)
+  elif scaling == QuantScaling.DYNAMIC:
+    amax = jnp.max(jnp.abs(x_f32), axis=reduce_axis, keepdims=True)
+    clamped_amax = jnp.maximum(amax, 1e-7)
+    scale_f32 = clamped_amax / q_max
+    inv_scale_f32 = q_max / clamped_amax
+  else:
+    raise ValueError(
+        f"Unsupported scaling mode '{scaling}'; expected 'dynamic' or 'static'."
+    )
+
+  q = x_f32 * inv_scale_f32
+  if jnp.issubdtype(q_dtype, jnp.integer):
+    q = jnp.clip(jnp.round(q), -q_max, q_max)
+  else:
+    q = jnp.clip(q, -q_max, q_max)
+  return q.astype(q_dtype), scale_f32
+
+
+@dataclasses.dataclass
+class QuantizedGemmParams(MatmulShapeParams):
+  """Configuration parameters for the `gemm_quantized` microbenchmark."""
+
+  DTYPE_CONSTRAINTS = {
+      "in_dtype": _UNQUANTIZED_FLOAT_DTYPES,
+      "quant_dtype": (jnp.float8_e4m3fn, jnp.float8_e5m2, jnp.int8),
+      "rhs_quant_dtype": (
+          jnp.float8_e4m3fn,
+          jnp.float8_e5m2,
+          jnp.int8,
+          jnp.int4,
+      ),
+      "out_dtype": _UNQUANTIZED_FLOAT_DTYPES,
+  }
+
+  quant_dtype: dtypes.DType = base.dtype_field(
+      default=dtypes.DType.FLOAT8_E4M3FN,
+      metadata={
+          "help": (
+              "Quantized LHS (and default RHS) operand data type fed to the"
+              " MXU (e.g. 'float8_e4m3fn', 'int8')."
+          )
+      },
+  )
+  rhs_quant_dtype: dtypes.DType = base.dtype_field(
+      default=dtypes.DType.FLOAT8_E4M3FN,
+      metadata={
+          "help": (
+              "Quantized RHS (B) operand data type. Defaults to `quant_dtype`;"
+              " also supports 'int4' when `quant_dtype` is FP8"
+              " ('float8_e4m3fn' or 'float8_e5m2')."
+          )
+      },
+  )
+  scaling: QuantScaling = dataclasses.field(
+      default=QuantScaling.DYNAMIC,
+      metadata={
+          "help": (
+              "Scale calibration: 'dynamic' (amax computed on the fly) or"
+              " 'static' (fixed clip bound 0.5 * Q_MAX, i.e. scale = 0.5)."
+          )
+      },
+  )
+  dequantize: bool = dataclasses.field(
+      default=False,
+      metadata={
+          "help": (
+              "If True, multiply the accumulator by the row and column"
+              " dequantization scales before casting to out_dtype."
+          )
+      },
+  )
+
+  def __post_init__(self):
+    if "rhs_quant_dtype" not in self._explicit_fields:
+      self.rhs_quant_dtype = self.quant_dtype
+    super().__post_init__()
+    if self.rhs_quant_dtype != self.quant_dtype and not (
+        self.rhs_quant_dtype == dtypes.DType.INT4
+        and self.quant_dtype in (
+            dtypes.DType.FLOAT8_E4M3FN,
+            dtypes.DType.FLOAT8_E5M2,
+        )
+    ):
+      raise ValueError(
+          "rhs_quant_dtype must match quant_dtype or be 'int4' paired with an"
+          " FP8 quant_dtype ('float8_e4m3fn' or 'float8_e5m2'), got"
+          f" quant_dtype='{self.quant_dtype}',"
+          f" rhs_quant_dtype='{self.rhs_quant_dtype}'."
+      )
+
+  def with_generation_defaults(
+      self, param_defaults: dict[str, Any]
+  ) -> base.BaseBenchmarkParams:
+    if (
+        param_defaults
+        and "quant_dtype" in param_defaults
+        and "quant_dtype" not in self._explicit_fields
+        and "rhs_quant_dtype" not in param_defaults
+        and "rhs_quant_dtype" not in self._explicit_fields
+    ):
+      param_defaults = {
+          **param_defaults,
+          "rhs_quant_dtype": param_defaults["quant_dtype"],
+      }
+    return super().with_generation_defaults(param_defaults)
+
+
+@registry.benchmark_registry.register("gemm_quantized", is_experimental=True)
+class QuantizedGemmBenchmark(BaseGemmBenchmark[QuantizedGemmParams]):
+  """[EXPERIMENTAL] GEMM with per-channel quantization of A and B."""
+
+  Config = QuantizedGemmParams  # pylint: disable=invalid-name
+  requires_ici: bool = False
+  REPORT_SCHEMA: Sequence[tuple[str, Callable[[Any], str]]] = (
+      ("in_dtype", report.format_str),
+      ("quant_dtype", report.format_str),
+      ("rhs_quant_dtype", report.format_str),
+      ("out_dtype", report.format_str),
+      ("m", report.format_str),
+      ("k", report.format_str),
+      ("n", report.format_str),
+      ("scaling", report.format_str),
+      ("dequantize", report.format_str),
+      ("total_flops", report.format_2f),
+      ("wall_clock_p50_ms", report.format_4f),
+      ("wall_clock_tflops_per_chip", report.format_2f),
+      ("xprof_p50_ms", report.format_4f),
+      ("xprof_tflops_per_chip", report.format_2f),
+  )
+
+  def get_compute_dtype(self) -> str:
+    """Returns the LHS quantized dtype, which determines the MXU peak TFLOPS."""
+    return str(self.config.quant_dtype)
+
+  def setup(self):
+    if self.mesh is None:
+      raise ValueError("Mesh not initialized.")
+    cfg = self.config
+    quant_dtype = dtypes.parse_dtype(cfg.quant_dtype)
+    rhs_quant_dtype = dtypes.parse_dtype(cfg.rhs_quant_dtype)
+    out_dtype = dtypes.parse_dtype(cfg.out_dtype)
+    both_int = jnp.issubdtype(quant_dtype, jnp.integer) and jnp.issubdtype(
+        rhs_quant_dtype, jnp.integer
+    )
+    dot_acc_dtype = jnp.int32 if both_int else jnp.float32
+
+    @jax.jit
+    def quant_gemm_fn(a, b):
+      with jax.named_scope(constants.MARKER):
+        qa, sf_a = _quantize_per_channel(
+            a,
+            reduce_axis=1,
+            quant_dtype=quant_dtype,
+            scaling=cfg.scaling,
+        )
+        qb, sf_b = _quantize_per_channel(
+            b,
+            reduce_axis=0,
+            quant_dtype=rhs_quant_dtype,
+            scaling=cfg.scaling,
+        )
+        acc = jax.lax.dot_general(
+            qa,
+            qb,
+            dimension_numbers=(((1,), (0,)), ((), ())),
+            preferred_element_type=dot_acc_dtype,
+        )
+        if cfg.dequantize:
+          acc = acc.astype(jnp.float32) * (sf_a * sf_b)
+        return acc.astype(out_dtype)
+
+    self._jit_fn = quant_gemm_fn
+
+  def get_run_identifier(self) -> str:
+    cfg = self.config
+    quant_str = (
+        f"{cfg.quant_dtype}"
+        if cfg.rhs_quant_dtype == cfg.quant_dtype
+        else f"{cfg.quant_dtype}_rhs_{cfg.rhs_quant_dtype}"
+    )
+    run_id = (
+        f"m_{cfg.m}_k_{cfg.k}_n_{cfg.n}_"
+        f"{cfg.in_dtype}_to_{quant_str}_{cfg.scaling}_out_{cfg.out_dtype}"
+    )
+    if cfg.dequantize:
+      run_id += "_dequant"
+    return run_id
+
+  def generate_inputs(self) -> tuple[Any, ...]:
+    cfg = self.config
+    in_dtype = dtypes.parse_dtype(cfg.in_dtype)
+    key_a, key_b = jax.random.split(jax.random.PRNGKey(cfg.seed))
+    a = self._replicated_normal(key_a, (cfg.m, cfg.k), in_dtype)
+    b = self._replicated_normal(key_b, (cfg.k, cfg.n), in_dtype)
+    return (a, b)
+
+  def run_op(self, *args) -> jax.Array:
+    if self._jit_fn is None:
+      raise ValueError("JIT function not initialized.")
+    return self._jit_fn(*args)
+
+  def get_total_bytes(self) -> float:
+    """Returns 1-pass algorithmic HBM bytes (read A, read B, write OUT)."""
+    cfg = self.config
+    m, k, n = cfg.m, cfg.k, cfg.n
+    in_bytes = dtypes.get_dtype_bytes(cfg.in_dtype)
+    out_bytes = dtypes.get_dtype_bytes(cfg.out_dtype)
+    return float((m * k + k * n) * in_bytes + m * n * out_bytes)
+
+  def get_total_flops(self) -> float:
+    m, k, n = self.config.m, self.config.k, self.config.n
+    return float(2 * m * n * k)

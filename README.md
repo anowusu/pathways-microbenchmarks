@@ -9,7 +9,10 @@
 **TPUMS (TPU Microbenchmark Suite)** is a modular, high-fidelity benchmarking and profiling framework designed to evaluate the compute, memory, and interconnect performance of Cloud TPUs (currently targeting **tpu7x (ironwood)** and **v6e (trillium)**) using JAX.
 
 > [!IMPORTANT]
-> **Project Status — Active Development (Pre-Release):** TPUMS is currently under active development and has not yet reached an official stable release. CLI flags, YAML configuration schemas, and reported metric names may evolve prior to the first tagged release.
+> **Project Status — Active Development (Pre-Release):** TPUMS is currently
+> under active development and has not yet reached an official stable release.
+> CLI flags, YAML configuration schemas, and reported metric names may evolve
+> prior to the first tagged release.
 
 ---
 
@@ -63,8 +66,8 @@
 | :--- | :--- | :--- | :--- |
 | **Compute** | **Matrix Multiplication (GEMM)** | Dense matrix multiplication ($$C = \alpha (A \times B) + \beta C$$) across configurable data types | • Compute Throughput (**TFLOPS**)<br>• Compute Roofline Efficiency (**%**)<br>• Compute Latency (**ms**) |
 | **Memory (HBM)** | **HBM Memory Bandwidth** | High Bandwidth Memory STREAM operations (Copy, Scale, Add, Triad, Read-Only, Write-Only) | • Memory Bandwidth (**GB/s**)<br>• Memory Roofline Efficiency (**%**)<br>• Memory Access Latency (**ms**) |
-| **Host I/O (PCIe)** | **Host-to-Device (H2D)**<br>**Device-to-Host (D2H)** | Host CPU memory to/from accelerator HBM data transfers | • PCIe Transfer Bandwidth (**GB/s**)<br>• Transfer Latency (**ms**) |
-| **Interconnect (ICI)** | **Device-to-Device (D2D)** | Point-to-point inter-chip data transfers across ICI links | • ICI Link Bandwidth (**GB/s**)<br>• Pairwise N × N Device Bandwidth Matrix<br>• Transfer Latency (**ms**) |
+| **Host I/O (PCIe)** | **Host-to-Device (H2D)**<br>**Device-to-Host (D2H)** | Host CPU memory to/from accelerator HBM data transfers | • PCIe Transfer Bandwidth (**GB/s**)<br>• Host Link Roofline Efficiency (**%**)<br>• Transfer Latency (**ms**) |
+| **Interconnect (ICI)** | **Device-to-Device (D2D)** | Data transfers between each device pair, over ICI (different chips) or die-to-die (same chip) | • D2D Link Bandwidth (**GB/s**)<br>• Pairwise N × N Device Bandwidth Matrix<br>• Transfer Latency (**ms**) |
 | **Collectives** | **All-Gather**<br>**All-Reduce**<br>**All-to-All** | Distributed collective communication across multi-chip topologies | • Collective Bus Bandwidth (**GB/s**)<br>• Collective Step Latency (**ms**) |
 
 ---
@@ -110,6 +113,8 @@ tpums platform describe
   "local_devices": 8,
   "process_count": 1,
   "process_index": 0,
+  "slice_count": 1,
+  "slice_index": 0,
   "python_version": "3.12.14",
   "jax_version": "0.10.1",
   "jaxlib_version": "0.10.1",
@@ -123,7 +128,7 @@ tpums platform describe
 Execute an HBM memory bandwidth sweep across multiple array sizes (`256 MiB` to `2048 MiB` total traffic) directly from the command line without writing any configuration files:
 
 ```bash
-tpums benchmark run hbm --xprof_timing --op_type copy --num_elements 67108864 134217728 268435456 536870912 --dtype bfloat16 --device_id 0
+tpums benchmark run hbm --xprof_timing --op_type copy --num_elements 67108864 134217728 268435456 536870912 --dtype bfloat16 --scope device
 ```
 
 <a id="4-console-output-preview"></a>
@@ -132,15 +137,15 @@ tpums benchmark run hbm --xprof_timing --op_type copy --num_elements 67108864 13
 TPUMS formats results into a clean, aligned summary banner:
 
 ```text
-========================================================================================================================================================
+================================================================================================================================================================================================================================================================================================================
 Benchmark Results (HBMBandwidthBenchmark)
-========================================================================================================================================================
-   dtype op_type device_id num_elements data_size_mib wall_clock_p50_ms wall_clock_bandwidth_per_device_gb_s xprof_p50_ms xprof_bandwidth_per_device_gb_s
-bfloat16    copy         0     67108864        256.00            0.2788                               962.86       0.0835                         3214.91
-bfloat16    copy         0    134217728        512.00            0.3596                              1492.96       0.1669                         3216.35
-bfloat16    copy         0    268435456       1024.00            0.4889                              2196.43       0.3316                         3238.06
-bfloat16    copy         0    536870912       2048.00            0.8582                              2502.18       0.6642                         3233.08
-========================================================================================================================================================
+================================================================================================================================================================================================================================================================================================================
+   dtype op_type  scope local_index num_devices num_elements data_size_mib wall_clock_p50_ms wall_clock_bandwidth_per_device_gb_s wall_clock_bandwidth_per_chip_gb_s wall_clock_bandwidth_per_host_gb_s xprof_p50_ms xprof_bandwidth_per_device_gb_s xprof_bandwidth_per_chip_gb_s xprof_bandwidth_per_host_gb_s
+bfloat16    copy device           0           1     67108864        256.00            0.2788                               962.86                                  -                                  -       0.0835                         3214.91                             -                             -
+bfloat16    copy device           0           1    134217728        512.00            0.3596                              1492.96                                  -                                  -       0.1669                         3216.35                             -                             -
+bfloat16    copy device           0           1    268435456       1024.00            0.4889                              2196.43                                  -                                  -       0.3316                         3238.06                             -                             -
+bfloat16    copy device           0           1    536870912       2048.00            0.8582                              2502.18                                  -                                  -       0.6642                         3233.08                             -                             -
+================================================================================================================================================================================================================================================================================================================
 ```
 
 ---
@@ -179,8 +184,9 @@ tpums platform describe
 
 # 2. List all registered, production-ready benchmarks
 tpums benchmark list
+tpums benchmark list --include_experimental  # Also list experimental ones
 
-# 3. Inspect typed CLI flags and default values for a specific benchmark
+# 3. Inspect typed CLI flags, per-field allowed choices (e.g. dtypes), and defaults
 # tpums benchmark run <benchmark_name> --help
 tpums benchmark run gemm --help
 ```
@@ -192,19 +198,19 @@ Execute benchmarks with typed arguments directly passed to the command line:
 
 ```bash
 # 1. HBM Memory Bandwidth on Device 0 (STREAM copy kernel)
-tpums benchmark run hbm --xprof_timing --op_type copy --num_elements 134217728 --dtype bfloat16 --device_id 0
+tpums benchmark run hbm --xprof_timing --op_type copy --num_elements 134217728 --dtype bfloat16 --scope device
 
 # 2. Matrix Multiplication (GEMM 4096 x 4096 x 4096)
 tpums benchmark run gemm --xprof_timing --m 4096 --k 4096 --n 4096 --in_dtype bfloat16 --out_dtype bfloat16
 
 # 3. Host-to-Device (PCIe) Transfer Latency & Bandwidth on device 0 via tpu-sync
-#    (--transfer_backend jax|tpu_sync; --device_id -1 uses all local devices)
-tpums benchmark run host_to_device --xprof_timing --data_size_mib 256 --dtype bfloat16 --transfer_backend tpu_sync --device_id 0
+#    (--transfer_backend jax|tpu_sync; --scope device|chip|host)
+tpums benchmark run host_to_device --xprof_timing --data_size_mib 256 --dtype bfloat16 --transfer_backend tpu_sync --scope device --local_index 0
 
 # 4. Device-to-Host (PCIe) Transfer Latency & Bandwidth on all local devices
-tpums benchmark run device_to_host --xprof_timing --data_size_mib 256 --dtype bfloat16 --transfer_backend tpu_sync --device_id -1
+tpums benchmark run device_to_host --xprof_timing --data_size_mib 256 --dtype bfloat16 --transfer_backend tpu_sync --scope host
 
-# 5. Device-to-Device (ICI) point-to-point transfer across all pairs
+# 5. Device-to-device (D2D) transfer across all pairs
 tpums benchmark run device_to_device --xprof_timing --data_size_mib 1024 --direction uni --dtype bfloat16
 
 # 6. Multi-Device All-Reduce Collective
@@ -218,7 +224,7 @@ tpums benchmark run all_reduce --xprof_timing --mesh_shape 2x2x2 --sharding_stra
 Pass multiple space-separated values to any flag in `tpums benchmark run` to expand and run their **Cartesian product** in a single invocation:
 
 ```bash
-# 1. Numeric + String DType Sweep (HBM: 2 num_elements × 2 dtypes = 4 runs)
+# 1. Numeric + DType Sweep (HBM: 2 num_elements × 2 dtypes = 4 runs)
 tpums benchmark run hbm --num_elements 134217728 268435456 --dtype bfloat16 float32
 
 # 2. Enum + Integer Dimension Sweep (All-Reduce: 2 ops × 2 dims = 4 runs)
@@ -250,13 +256,33 @@ tpums benchmark run-config configs/sample_configs/parameter_sweep.yaml \
         - **Interactive CLI (`tpums benchmark run`)**: Pass `--xprof_timing` directly on the command line.
         - **YAML Config (`tpums benchmark run-config`)**: Set `xprof_timing: true` inside the YAML `benchmark:` block.
     2. **Set Trace Output Directory (`--xprof_dir <path>`, optional)**: Directory to save TensorBoard / XProf hardware trace files (`.xplane.pb`). Defaults to `/tmp/tensorboard`; **only active when XProf timing is enabled**.
-    3. **Device Timing Aggregation (`--xprof_device_timing_aggregation <mode>` / `xprof_device_timing_aggregation: <mode>`, optional)**: Controls how XProf kernel durations are aggregated across devices into a per-step series:
-        - `measured_device_or_first` *(default)*: Uses the device returned by `get_device_to_measure()` (or first local device `TPU:0` by default).
+    3. **Device Timing Aggregation (`--xprof_device_timing_aggregation <mode>` /
+       `xprof_device_timing_aggregation: <mode>`, optional)**: Controls how
+       XProf kernel durations are aggregated across devices into a per-step
+       series:
+        - `measured_device_or_first` *(default)*: Uses the device returned by
+          `get_device_to_measure()` (defaults to `get_devices_to_measure()[0]`,
+          i.e. local device `TPU:0` unless the benchmark narrows its
+          participating devices; multi-device `hbm` scopes promote this default
+          to `local_slowest_device`).
         - `local_slowest_device`: Selects the local device with the highest median kernel duration.
         - `global_slowest_per_step`: Takes the slowest (maximum) kernel duration across all devices on all hosts at each step.
+        - **Supported modes**: Multi-device TPU benchmarks (`gemm`, collectives,
+          compute ops, and multi-device `hbm` scopes) support all three.
+          Single-device `hbm` scopes (`scope=device`, or `scope=chip` on
+          single-die TPUs), `device_to_device` (whose owner host's series is
+          broadcast to all hosts), and host-timed `host_to_device` and
+          `device_to_host` support only `measured_device_or_first`. An
+          unsupported mode fails at benchmark start with a `ValueError`.
+        - **Choosing a mode**: `global_slowest_per_step` is intended for
+          collectives, where all devices finish each step together. For
+          independent per-device workloads (`gemm`, compute ops, multi-device
+          `hbm`), it takes a per-step maximum over unsynchronized devices, which
+          is an upper (tail) estimate; prefer `local_slowest_device` there.
 - **Report Output & Compiler Flags**:
     - **`--output_dir <path>`**: Directory to save `summary.csv` and `detailed.json` (defaults to `results/`).
     - **`--xla_flags_file_path <path>`**: Optional path to a custom YAML file overriding default per-benchmark XLA / compiler runtime flags.
+- **Standalone Host Init (`--standalone_host_init` / `standalone_host_init: true` under `benchmark:`, optional)**: Initializes this host as a standalone 1-host topology inside a multi-host topology (skips SliceBuilder, disables the cross-host launch barrier and SparseCore copy offloading, does not start the JAX distributed coordinator) so that a benchmark can be used for node-local diagnostics without the other hosts of the topology participating. ICI routing is not configured in this mode (neither intra- nor inter-host), so it is limited to benchmarks that do not require ICI (`requires_ici = False`, e.g. `gemm`, `gemm_throttling`, `gemm_pulse`, `hbm`, `host_to_device` and `device_to_host`); other benchmarks raise an error. Off by default; has no effect on normal single- or multi-host runs. Relies on internal `libtpu` flags (`--deepsea_hal_test_*`) that are not a stable public interface and may change across `libtpu` versions.
 
 ---
 
@@ -272,7 +298,10 @@ Configuration files define a top-level `benchmark:` mapping containing:
 
 - **`name:` (`<benchmark_name>`)** — Target benchmark name (e.g., `gemm`, `hbm`, `all_reduce`; see [Benchmark Catalog](#benchmark-catalog)).
 - **`xprof_timing:`** *(optional)* — Boolean (`true` / `false`) to enable XProf hardware trace collection and device timing analysis.
-- **`xprof_device_timing_aggregation:`** *(optional)* — Device timing aggregation mode when `xprof_timing: true` (`measured_device_or_first` [default], `local_slowest_device`, or `global_slowest_per_step`).
+- **`xprof_device_timing_aggregation:`** *(optional)* — Device timing
+  aggregation mode when `xprof_timing: true` (`measured_device_or_first`
+  [default], `local_slowest_device`, or `global_slowest_per_step`).
+- **`standalone_host_init:`** *(optional)* — Boolean (`true` / `false`, default `false`) to initialize this host standalone inside a multi-host topology for node-local diagnostics (see [Common Execution Flags](#4-common-execution-flags)).
 - **`params:`** *(optional)* — Baseline execution parameters shared across all generated runs.
 - **`cases:` / `cases_from_csv:` / `sweep:`** *(optional)* — Case override and parameter sweep generators.
 
@@ -457,8 +486,8 @@ TPUMS records primary performance metrics across both timing domains:
 | :--- | :--- | :--- | :--- |
 | **Latency (`ms`)** | `wall_clock_p50_ms`<br>*(+ `p90`, `avg`, `std`)* | `xprof_p50_ms`<br>*(+ `p90`, `avg`, `std`)* | Execution duration across timed iterations (`p50` median, `p90`, mean, and standard deviation). |
 | **Compute Throughput (`TFLOPS`)** | `wall_clock_tflops_per_chip`<br>`wall_clock_tflops_per_device` | `xprof_tflops_per_chip`<br>`xprof_tflops_per_device` | Achieved compute throughput per physical TPU chip or per logical device ($$10^{12}$$ FLOPS). |
-| **Bandwidth (`GB/s`)** | `wall_clock_bandwidth_per_chip_gb_s`<br>`wall_clock_bandwidth_per_device_gb_s` | `xprof_bandwidth_per_chip_gb_s`<br>`xprof_bandwidth_per_device_gb_s` | Achieved HBM, PCIe, ICI link, or collective bus bandwidth per chip or per device ($$10^9$$ bytes/sec). |
-| **Roofline Efficiency (`%`)** | `wall_clock_compute_roofline_efficiency_pct`<br>`wall_clock_memory_roofline_efficiency_pct`<br>`wall_clock_ici_roofline_efficiency_pct` | `xprof_compute_roofline_efficiency_pct`<br>`xprof_memory_roofline_efficiency_pct`<br>`xprof_ici_roofline_efficiency_pct` | Achieved compute, memory, or ICI (`all_to_all` only) performance as a percentage of the hardware's theoretical peak (`0–100%`). |
+| **Bandwidth (`GB/s`)** | `wall_clock_bandwidth_per_chip_gb_s`<br>`wall_clock_bandwidth_per_device_gb_s`<br>`wall_clock_bandwidth_per_host_gb_s` | `xprof_bandwidth_per_chip_gb_s`<br>`xprof_bandwidth_per_device_gb_s`<br>`xprof_bandwidth_per_host_gb_s` | Achieved HBM, PCIe, ICI link, or collective bus bandwidth per chip, per device, or per host ($$10^9$$ bytes/sec). |
+| **Roofline Efficiency (`%`)** | `wall_clock_compute_roofline_efficiency_pct`<br>`wall_clock_memory_roofline_efficiency_pct`<br>`wall_clock_ici_roofline_efficiency_pct`<br>`wall_clock_roofline_efficiency_pct` | `xprof_compute_roofline_efficiency_pct`<br>`xprof_memory_roofline_efficiency_pct`<br>`xprof_ici_roofline_efficiency_pct`<br>`xprof_roofline_efficiency_pct` | Achieved compute, memory, ICI (`all_to_all` only), or host link (`host_to_device` / `device_to_host`: PCIe) performance as a percentage of the hardware's theoretical peak. |
 
 See **[Throughput & Bandwidth Metric Conventions in `docs/BENCHMARKS.md`](docs/BENCHMARKS.md#per-device-vs-per-chip-scaling)** for how `_per_chip` vs. `_per_device` scales across dual-device (`tpu7x`) and single-device (`v6e`) TPU chips and which metrics each benchmark reports.
 
@@ -468,7 +497,32 @@ See **[Throughput & Bandwidth Metric Conventions in `docs/BENCHMARKS.md`](docs/B
 After every run, TPUMS automatically saves two files in the specified `--output_dir`, both exporting the **exact same complete set of metrics, benchmark parameters, and platform metadata**:
 
 1. **`summary.csv`**: A flat, tabular CSV containing all reported metrics, benchmark parameters, and platform metadata for every configuration tested. Ideal for loading into Pandas, Google Sheets, or dashboarding pipelines.
-2. **`detailed.json`**: A structured JSON record containing the complete benchmark metrics, configuration parameters, platform metadata, and execution timestamps for programmatic analysis and automation pipelines.
+2. **`detailed.json`**: A structured JSON record containing the complete
+   benchmark metrics, configuration parameters, platform metadata, and
+   raw timing series for programmatic analysis and automation pipelines.
+   Each record contains `metadata` (including `params`), `metrics` (all
+   `wall_clock_*`, `xprof_*`, workload, and roofline metrics), and
+   `timings`:
+    - **`timings.wall_clock`**: `durations_ms` (raw per-step wall-clock
+      latencies in ms).
+    - **`timings.xprof`**: `null` when XProf timing is disabled;
+      otherwise:
+        - **`durations_ms`**: The per-step XProf series (ms) behind the
+          headline `xprof_*` metrics.
+        - **`measured_device`**: The device behind that series, as
+          `process_{process_index}/TPU:{local_hardware_id}`. It is `null`
+          when no XProf data was parsed, for `global_slowest_per_step`
+          (which takes the per-step maximum across all devices), and for
+          host-side timing (`host_to_device` and `device_to_host`).
+        - **`metrics_per_local_device`**: XProf latency summary
+          (`p50_ms`, `avg_ms`, `p90_ms`, `std_ms`)
+          of each local device in `get_devices_to_measure()` (all local
+          devices by default, or the single target device for `hbm`),
+          keyed by `process_{process_index}/TPU:{local_hardware_id}`. It
+          is `null` when any of those devices has no XProf data, for
+          host-side timing (`host_to_device` and `device_to_host`), and
+          for `device_to_device` (its owner-host series is broadcast to
+          all hosts).
 
 <a id="profiling-traces-tensorboard--xprof"></a>
 ### Profiling Traces (TensorBoard / XProf)
@@ -515,7 +569,7 @@ accelerator_microbenchmarks/
 └── src/
     └── accelerator_microbenchmarks/
         ├── benchmarks/         # Concrete benchmark implementations (gemm, hbm, collectives, etc.)
-        ├── core/               # Core framework (base class, config, runner, reporting)
+        ├── core/               # Core framework (base class, dtypes, config, runner, reporting)
         ├── cli.py              # Canonical CLI entry point (tpums)
         └── op_flags.yaml       # Hardware-specific compiler & XLA flag mappings
 ```

@@ -1,8 +1,10 @@
 """Unit tests for the TPUMS CLI (cli.py)."""
 
+import argparse
 import dataclasses
 import io
 import json
+import os
 import sys
 from unittest import mock
 
@@ -14,12 +16,31 @@ from accelerator_microbenchmarks.benchmarks import collectives
 from accelerator_microbenchmarks.benchmarks import device_to_device
 from accelerator_microbenchmarks.benchmarks import hbm
 from accelerator_microbenchmarks.benchmarks import matmul
+from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import config
+from accelerator_microbenchmarks.core import dtypes
 from accelerator_microbenchmarks.core import platform
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import runner
 from accelerator_microbenchmarks.tests import test_report_utils
 import jax
+
+# Every DType value, in declaration order (pinned by test_dtypes.py), as listed
+# in dtype error messages.
+_ALL_DTYPE_NAMES = ", ".join(dtypes.DType)
+# The DType values `hbm` and the reduction collectives accept: every member
+# except bool and complex64 (excluded by their `DTYPE_CONSTRAINTS`) and the
+# sub-byte int4 and float4_e2m1fn (`ALLOW_SUB_BYTE_DTYPES = False`). Named
+# explicitly instead of reusing the code under test.
+_HBM_REJECTED_DTYPES = frozenset({
+    dtypes.DType.BOOL,
+    dtypes.DType.COMPLEX64,
+    dtypes.DType.INT4,
+    dtypes.DType.FLOAT4_E2M1FN,
+})
+_BYTE_NUMERIC_DTYPE_NAMES = ", ".join(
+    d for d in dtypes.DType if d not in _HBM_REJECTED_DTYPES
+)
 
 
 class TestCli(parameterized.TestCase):
@@ -52,6 +73,8 @@ class TestCli(parameterized.TestCase):
           "local_devices",
           "process_count",
           "process_index",
+          "slice_count",
+          "slice_index",
           "python_version",
           "jax_version",
           "jaxlib_version",
@@ -60,6 +83,8 @@ class TestCli(parameterized.TestCase):
       self.assertEqual(set(data.keys()), expected_keys)
       self.assertEqual(data["tpu_type"], "tpu7x")
       self.assertEqual(data["topology"], "2x2x1")
+      self.assertEqual(data["slice_count"], 1)
+      self.assertEqual(data["slice_index"], 0)
       self.assertIsInstance(data["total_devices"], int)
       self.assertIsInstance(data["local_devices"], int)
       self.assertIsInstance(data["process_count"], int)
@@ -99,6 +124,44 @@ class TestCli(parameterized.TestCase):
       self.assertIn("hbm", tasks)
       self.assertIn("all_reduce", tasks)
       self.assertIn("device_to_device", tasks)
+
+  def test_benchmark_list_default_excludes_experimental(self):
+    """Verifies default `tpums benchmark list` omits experimental benchmarks."""
+    with mock.patch.object(sys, "stdout", new=io.StringIO()) as fake_out:
+      cli.run(["benchmark", "list"])
+    data = json.loads(fake_out.getvalue())
+    tasks = [item["task"] for item in data]
+    self.assertIn("gemm", tasks)
+    self.assertNotIn("gemm_throttling", tasks)
+    self.assertNotIn("gemm_generalized", tasks)
+    for item in data:
+      self.assertEqual(set(item.keys()), {"task"})
+
+  def test_benchmark_list_include_experimental(self):
+    """Verifies `--include_experimental` lists and tags experimental tasks."""
+    with mock.patch.object(sys, "stdout", new=io.StringIO()) as fake_out:
+      cli.run(["benchmark", "list", "--include_experimental"])
+    data = json.loads(fake_out.getvalue())
+    stability_by_task = {item["task"]: item["stability"] for item in data}
+    self.assertEqual(stability_by_task["gemm"], "stable")
+    self.assertEqual(stability_by_task["gemm_throttling"], "experimental")
+    self.assertNotIn("gemm_generalized", stability_by_task)
+    tasks = [item["task"] for item in data]
+    self.assertEqual(tasks, sorted(tasks))
+
+  def test_benchmark_run_parser_registers_experimental_tasks(self):
+    """Verifies every benchmark, incl. experimental, parses under `run`."""
+    parser = cli.create_parser()
+    for name in registry.benchmark_registry.list_benchmark_names(
+        include_experimental=True
+    ):
+      with self.subTest(name=name):
+        args, _ = parser.parse_known_args(["benchmark", "run", name])
+        self.assertEqual(args.task, name)
+    # Aliases (e.g. `gemm_generalized` for `gemm`) are not `run` subcommands.
+    with mock.patch.object(sys, "stderr", new=io.StringIO()):
+      with self.assertRaises(SystemExit):
+        parser.parse_known_args(["benchmark", "run", "gemm_generalized"])
 
   @mock.patch.object(runner, "run_benchmarks")
   def test_benchmark_run_hbm(self, mock_run_benchmarks):
@@ -288,17 +351,18 @@ benchmark:
     warmup_tries: 1
     num_runs: 1
 """)
+    fake_flags = self.create_tempfile(content="gemm:\n  flags: []\n")
     config_path = fake_config.full_path
     cli.run([
         "benchmark",
         "run-config",
         config_path,
         "--xla_flags_file_path",
-        "/tmp/custom_op_flags.yaml",
+        fake_flags.full_path,
     ])
     mock_run_benchmarks.assert_called_once()
     _, kwargs = mock_run_benchmarks.call_args
-    self.assertEqual(kwargs["xla_flags_file_path"], "/tmp/custom_op_flags.yaml")
+    self.assertEqual(kwargs["xla_flags_file_path"], fake_flags.full_path)
 
   @parameterized.named_parameters(
       (
@@ -429,7 +493,36 @@ benchmark:
   params:
     dtype: float16
 """,
-          "^dtype: Unsupported dtype: 'float16'",
+          (
+              r"^dtype: Unsupported dtype 'float16'\. Supported dtypes for"
+              r" dtype: bfloat16, float32$"
+          ),
+      ),
+      (
+          "hbm_dtype_typo",
+          """
+benchmark:
+  name: hbm
+  params:
+    dtype: bf16
+""",
+          (
+              rf"^dtype: Invalid dtype 'bf16'\. Supported dtypes for dtype:"
+              rf" {_BYTE_NUMERIC_DTYPE_NAMES}$"
+          ),
+      ),
+      (
+          "gemm_in_dtype_typo",
+          """
+benchmark:
+  name: gemm
+  params:
+    in_dtype: fp8
+""",
+          (
+              rf"^in_dtype: Invalid dtype 'fp8'\. Supported dtypes for"
+              rf" in_dtype: {_ALL_DTYPE_NAMES}$"
+          ),
       ),
       (
           "hbm_64_bit_dtype",
@@ -460,7 +553,10 @@ benchmark:
   sweep:
     dtype: [bfloat16, complex64]
 """,
-          "^dtype: Unsupported dtype: 'complex64'",
+          (
+              rf"^dtype: Unsupported dtype 'complex64'\. Supported dtypes for"
+              rf" dtype: {_BYTE_NUMERIC_DTYPE_NAMES}$"
+          ),
       ),
   )
   @mock.patch.object(runner, "run_benchmarks", autospec=True)
@@ -485,6 +581,70 @@ benchmark:
     ):
       cli.run(["benchmark", "run", "hbm", "--dtype", "float64"])
     mock_run_benchmarks.assert_not_called()
+
+  @parameterized.named_parameters(
+      ("hbm_typo", "hbm", "--dtype", "bf16", _BYTE_NUMERIC_DTYPE_NAMES),
+      ("gemm_in_dtype_typo", "gemm", "--in_dtype", "fp8", _ALL_DTYPE_NAMES),
+  )
+  @mock.patch.object(runner, "run_benchmarks", autospec=True)
+  def test_benchmark_run_invalid_dtype_choice_exits(
+      self, task_name, flag_name, invalid_val, choices, mock_run_benchmarks
+  ):
+    """Verifies argparse rejects dtypes outside the field's allowed dtypes."""
+    with mock.patch.object(sys, "stderr", new=io.StringIO()) as fake_err:
+      with self.assertRaises(SystemExit) as cm:
+        cli.run(["benchmark", "run", task_name, flag_name, invalid_val])
+    self.assertEqual(cm.exception.code, 2)
+    error = fake_err.getvalue()
+    self.assertIn(f"argument {flag_name}: invalid choice:", error)
+    self.assertIn(invalid_val, error)
+    # Python versions differ in how argparse quotes the choices.
+    self.assertIn(choices, error.replace("'", ""))
+    mock_run_benchmarks.assert_not_called()
+
+  def test_benchmark_run_help_lists_dtype_choices(self):
+    """Verifies `--help` lists a dtype flag's allowed dtypes and default."""
+    with mock.patch.object(sys, "stdout", new=io.StringIO()) as fake_out:
+      with self.assertRaises(SystemExit):
+        cli.run(["benchmark", "run", "hbm", "--help"])
+    output = fake_out.getvalue()
+    choices = _BYTE_NUMERIC_DTYPE_NAMES.replace(", ", ",")
+    self.assertIn(f"--dtype {{{choices}}}", output)
+    # Help text may wrap anywhere, so compare with normalized whitespace.
+    self.assertIn("(default: bfloat16)", " ".join(output.split()))
+
+  def test_dtype_flag_choices_match_allowed_dtypes(self):
+    """Verifies every dtype flag's choices are its field's allowed_dtypes()."""
+    cli.create_parser()  # Registers every benchmark.
+    tasks = registry.benchmark_registry.list_benchmark_names(
+        include_experimental=True, include_aliases=False
+    )
+    self.assertNotEmpty(tasks)
+    for task_name in tasks:
+      config_cls = registry.benchmark_registry.get_benchmark(task_name).Config
+      parser = argparse.ArgumentParser()
+      cli.add_dataclass_arguments(parser, config_cls)
+      choices_by_dest = {
+          action.dest: action.choices
+          for action in parser._actions  # pylint: disable=protected-access
+      }
+      for field in dataclasses.fields(config_cls):
+        if not base.is_dtype_field(field):
+          continue
+        with self.subTest(task=task_name, field=field.name):
+          self.assertEqual(
+              choices_by_dest[field.name],
+              [d.value for d in config_cls.allowed_dtypes(field.name)],
+          )
+
+  @mock.patch.object(runner, "run_benchmarks", autospec=True)
+  def test_benchmark_run_gemm_accepts_sub_byte_in_dtype(
+      self, mock_run_benchmarks
+  ):
+    """Verifies gemm, which allows sub-byte dtypes, accepts `int4`."""
+    cli.run(["benchmark", "run", "gemm", "--in_dtype", "int4"])
+    ((_, task_config),) = mock_run_benchmarks.call_args.kwargs["tasks"]
+    self.assertIs(task_config.in_dtype, dtypes.DType.INT4)
 
   _BENCHMARK_RUN_CONFIG_ENUM_CASES = (
       tuple(
@@ -620,6 +780,58 @@ benchmark:
     self.assertEqual(kwargs["xprof_dir"], "/tmp/tensorboard")
 
   @parameterized.named_parameters(
+      ("flag_set", ["--standalone_host_init"], True),
+      ("flag_omitted", [], False),
+  )
+  @mock.patch.object(runner, "run_benchmarks")
+  def test_benchmark_run_standalone_host_init(
+      self, extra_flags, expected, mock_run_benchmarks
+  ):
+    """Verifies that `benchmark run` forwards --standalone_host_init."""
+    cli.run(
+        ["benchmark", "run", "gemm", "-m", "128", "-n", "128", "-k", "128"]
+        + extra_flags
+    )
+    mock_run_benchmarks.assert_called_once()
+    _, kwargs = mock_run_benchmarks.call_args
+    self.assertIs(kwargs["standalone_host_init"], expected)
+
+  @parameterized.named_parameters(
+      ("yaml_true", "  standalone_host_init: true\n", [], True),
+      ("yaml_false", "  standalone_host_init: false\n", [], False),
+      ("omitted", "", [], False),
+      ("cli_flag", "", ["--standalone_host_init"], True),
+      (
+          "cli_flag_overrides_yaml_false",
+          "  standalone_host_init: false\n",
+          ["--standalone_host_init"],
+          True,
+      ),
+  )
+  @mock.patch.object(runner, "run_benchmarks")
+  def test_benchmark_run_config_standalone_host_init(
+      self, yaml_snippet, extra_flags, expected, mock_run_benchmarks
+  ):
+    """Verifies standalone_host_init resolution for benchmark run-config."""
+    config_yaml = (
+        "benchmark:\n"
+        "  name: gemm\n"
+        f"{yaml_snippet}"
+        "  params:\n"
+        "    warmup_tries: 1\n"
+        "    num_runs: 1\n"
+    )
+    fake_config = self.create_tempfile(content=config_yaml)
+    cli.run(["benchmark", "run-config", fake_config.full_path] + extra_flags)
+    mock_run_benchmarks.assert_called_once()
+    _, kwargs = mock_run_benchmarks.call_args
+    self.assertIs(kwargs["standalone_host_init"], expected)
+    # The `benchmark:`-level key must not leak into the benchmark Config
+    # dataclass.
+    _, task_config = kwargs["tasks"][0]
+    self.assertFalse(hasattr(task_config, "standalone_host_init"))
+
+  @parameterized.named_parameters(
       (
           "yaml_xprof_true",
           """
@@ -702,46 +914,74 @@ benchmark:
     _, kwargs = mock_run_benchmarks.call_args
     self.assertIs(kwargs["xprof_timing"], False)
 
-  def test_google_flags_parser(self):
-    """Verifies that _google_flags_parser strips Abseil flags and returns domain argv."""
-    # 1. Leading and trailing Abseil flags
-    raw_argv = [
-        "tpums_tpu",
-        "--alsologtostderr",
-        "--v=1",
-        "benchmark",
-        "run-config",
-        "some_config.yaml",
-        "--output_dir=results",
-    ]
-    parsed_argv = cli._google_flags_parser(raw_argv)
-    self.assertEqual(
-        parsed_argv,
-        ["benchmark", "run-config", "some_config.yaml", "--output_dir=results"],
+  @mock.patch.object(os, "execvpe")
+  def test_maybe_reexec_for_op_env_reexecs_when_env_differs(self, mock_execvpe):
+    """Verifies _maybe_reexec_for_op_env re-execs when op_flags.yaml env differs."""
+    with mock.patch.dict(os.environ, {}, clear=True):
+      cli._maybe_reexec_for_op_env([{"name": "dcn_all_reduce"}])  # pylint: disable=protected-access
+    mock_execvpe.assert_called_once_with(
+        sys.orig_argv[0],
+        sys.orig_argv,
+        {
+            "GLIBC_TUNABLES": "glibc.pthread.rseq=0",
+            cli._REEXEC_SENTINEL: "1",  # pylint: disable=protected-access
+        },
     )
 
-    # 2. Interspersed Borg/Abseil flags
-    interspersed_argv = [
-        "/usr/bin/tpums",
-        "--alsologtostderr",
-        "benchmark",
-        "--v=2",
-        "run-config",
-        "some_config.yaml",
-        "--hw=gfl_2x2x1",
-    ]
-    parsed_interspersed = cli._google_flags_parser(interspersed_argv)
-    self.assertEqual(
-        parsed_interspersed,
-        ["benchmark", "run-config", "some_config.yaml", "--hw=gfl_2x2x1"],
-    )
+  @parameterized.named_parameters(
+      ("no_op_env_all_reduce", "all_reduce", {}),
+      ("no_op_env_gemm", "gemm", {}),
+      (
+          "already_matches",
+          "dcn_all_reduce",
+          {"GLIBC_TUNABLES": "glibc.pthread.rseq=0"},
+      ),
+      (
+          "sentinel_set",
+          "dcn_all_reduce",
+          {cli._REEXEC_SENTINEL: "1"},  # pylint: disable=protected-access
+      ),
+  )
+  @mock.patch.object(os, "execvpe")
+  def test_maybe_reexec_for_op_env_noop(
+      self, task_name, initial_env, mock_execvpe
+  ):
+    """Verifies _maybe_reexec_for_op_env is a no-op when not needed."""
+    with mock.patch.dict(os.environ, initial_env, clear=True):
+      cli._maybe_reexec_for_op_env([{"name": task_name}])  # pylint: disable=protected-access
+    mock_execvpe.assert_not_called()
 
-  @mock.patch.object(cli.app, "run")
-  def test_main_invokes_app_run(self, mock_app_run):
-    """Verifies that main delegates to absl.app.run with _google_flags_parser."""
-    cli.main()
-    mock_app_run.assert_called_once_with(
-        cli.run, flags_parser=cli._google_flags_parser
+  @parameterized.named_parameters(
+      ("run", "run", "dcn_all_reduce"),
+      ("run_config", "run-config", "dcn_all_reduce"),
+  )
+  @mock.patch.object(runner, "run_benchmarks")
+  @mock.patch.object(cli, "_maybe_reexec_for_op_env")
+  def test_run_invokes_maybe_reexec_before_run_benchmarks(
+      self, action, task, mock_reexec, mock_run_benchmarks
+  ):
+    """Verifies cli.run calls _maybe_reexec_for_op_env before run_benchmarks."""
+    calls = mock.Mock()
+    calls.attach_mock(mock_reexec, "reexec")
+    calls.attach_mock(mock_run_benchmarks, "run_benchmarks")
+    if action == "run":
+      cli.run(["benchmark", "run", task])
+      mock_reexec.assert_called_once_with(
+          [{"name": task}], None, tpu_version=None
+      )
+    else:
+      fake_config = self.create_tempfile(
+          content=f"benchmark:\n  name: {task}\n"
+      )
+      cli.run(["benchmark", "run-config", fake_config.full_path])
+      mock_reexec.assert_called_once_with(
+          [{"name": task}],
+          None,
+          config_path=fake_config.full_path,
+          tpu_version=None,
+      )
+    self.assertEqual(
+        [c[0] for c in calls.mock_calls], ["reexec", "run_benchmarks"]
     )
 
   def test_benchmark_run_help_lists_tasks(self):
@@ -755,11 +995,18 @@ benchmark:
       self.assertIn("gemm", output)
       self.assertIn("all_reduce", output)
       self.assertIn("hbm", output)
+      normalized = " ".join(output.split())
+      self.assertIn("gemm Run gemm benchmark.", normalized)
+      self.assertIn(
+          "gemm_throttling [experimental] Run gemm_throttling benchmark.",
+          normalized,
+      )
 
   def test_benchmark_run_help_all_registered_tasks(self):
     """Verifies that `tpums benchmark run <task> --help` outputs parameter help for all tasks."""
+    cli.create_parser()  # Loads all benchmarks regardless of test order.
     tasks = registry.benchmark_registry.list_benchmark_names(
-        include_experimental=False, include_aliases=False
+        include_experimental=True, include_aliases=False
     )
     for task_name in tasks:
       with self.subTest(task=task_name):
@@ -1096,6 +1343,24 @@ benchmark:
     self.assertEqual(
         kwargs["xprof_device_timing_aggregation"], device_timing_aggregation
     )
+
+  @mock.patch.object(runner, "run_benchmarks")
+  def test_benchmark_run_tpu_version_forwarded(self, mock_run_benchmarks):
+    """Verifies --tpu_version is forwarded to runner.run_benchmarks."""
+    cli.run([
+        "benchmark",
+        "run",
+        "gemm",
+        "--tpu_version",
+        "tpu7x",
+        "-m",
+        "1024",
+    ])
+    mock_run_benchmarks.assert_called_once()
+    _, kwargs = mock_run_benchmarks.call_args
+    self.assertEqual(kwargs["tpu_version"], "tpu7x")
+    _, task_config = kwargs["tasks"][0]
+    self.assertEqual(task_config.m, 1024)
 
 
 if __name__ == "__main__":

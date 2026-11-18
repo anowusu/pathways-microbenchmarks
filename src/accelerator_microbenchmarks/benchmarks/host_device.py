@@ -1,10 +1,13 @@
 """Host-to-Device and Device-to-Host transfer performance benchmarks."""
 
 import dataclasses
+import logging
+import math
 from typing import Any, Callable, Optional, Sequence
 
 from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import dtypes
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import report
 from accelerator_microbenchmarks.core import utils
@@ -18,8 +21,6 @@ from tpu_sync.api.jax import kv_cache_manager
 _COLUMNS = 128
 # Mesh axis name used to shard the transfer buffer across local devices.
 _DEVICE_AXIS = "device"
-# `device_id` sentinel selecting every local device.
-ALL_LOCAL_DEVICES = -1
 
 
 class TransferBackend(constants.ParamEnum):
@@ -36,8 +37,12 @@ class TransferBackend(constants.ParamEnum):
 
 
 @dataclasses.dataclass
-class HostDeviceParams(base.SingleDtypeBenchmarkParams):
+class HostDeviceParams(base.ScopeParamsMixin, base.SingleDtypeBenchmarkParams):
   """Parameters for Host-to-Device and Device-to-Host benchmarks."""
+
+  # rows_per_device and get_total_bytes() count itemsize bytes per element,
+  # while tpu_sync DMAs the packed on-device size.
+  ALLOW_SUB_BYTE_DTYPES = False
 
   data_size_mib: int = dataclasses.field(
       default=64,
@@ -56,14 +61,12 @@ class HostDeviceParams(base.SingleDtypeBenchmarkParams):
           )
       },
   )
-  device_id: int = dataclasses.field(
-      default=ALL_LOCAL_DEVICES,
+  scope: constants.Scope = dataclasses.field(
+      default=constants.Scope.HOST,
       metadata={
-          "min": ALL_LOCAL_DEVICES,
           "help": (
-              "Target local accelerator device ID (0..N-1), or"
-              f" {ALL_LOCAL_DEVICES} (ALL_LOCAL_DEVICES) to transfer across"
-              " all local devices concurrently."
+              "Target measurement scope: 'device' (single local device), 'chip'"
+              " (all devices on one local chip), or 'host' (all local devices)."
           ),
       },
   )
@@ -78,17 +81,25 @@ class _HostDeviceBenchmark(base.BaseBenchmark[HostDeviceParams]):
 
   Config = HostDeviceParams  # pylint: disable=invalid-name
   derive_chip_bandwidth: bool = False
+  # Data moves between host buffers and each local device only; no ICI.
+  requires_ici: bool = False
+  roofline_mode: constants.RooflineMode = (
+      constants.RooflineMode.HOST_DEVICE_LINK
+  )
   REPORT_SCHEMA: Sequence[tuple[str, Callable[[Any], str]]] = (
       ("dtype", report.format_str),
       ("transfer_backend", report.format_str),
-      ("device_id", report.format_str),
+      ("scope", report.format_str),
+      ("local_index", report.format_str),
       ("num_devices", report.format_str),
       ("data_size_mib", report.format_str),
       ("wall_clock_p50_ms", report.format_4f),
       ("wall_clock_bandwidth_per_device_gb_s", report.format_2f),
+      ("wall_clock_bandwidth_per_chip_gb_s", report.format_2f),
       ("wall_clock_bandwidth_per_host_gb_s", report.format_2f),
       ("xprof_p50_ms", report.format_4f),
       ("xprof_bandwidth_per_device_gb_s", report.format_2f),
+      ("xprof_bandwidth_per_chip_gb_s", report.format_2f),
       ("xprof_bandwidth_per_host_gb_s", report.format_2f),
   )
 
@@ -105,26 +116,17 @@ class _HostDeviceBenchmark(base.BaseBenchmark[HostDeviceParams]):
   def use_tpu_sync(self) -> bool:
     return self.config.transfer_backend == TransferBackend.TPU_SYNC
 
-  def get_transfer_devices(self) -> list[jax.Device]:
-    """Returns the local devices that participate in the transfer."""
-    local_devices = jax.local_devices()
-    device_id = self.config.device_id
-    if device_id == ALL_LOCAL_DEVICES:
-      return list(local_devices)
-    if device_id >= len(local_devices):
-      raise ValueError(
-          f"device_id ({device_id}) exceeds the number of local devices"
-          f" ({len(local_devices)})."
-      )
-    return [local_devices[device_id]]
+  def get_devices_to_measure(self) -> list[jax.Device]:
+    """Returns the local JAX devices that participate in the transfer."""
+    return self.get_devices_for_scope()
 
   @property
   def num_transfer_devices(self) -> int:
-    return len(self.get_transfer_devices())
+    return len(self.get_devices_to_measure())
 
   @property
   def rows_per_device(self) -> int:
-    itemsize = jnp.dtype(utils.parse_dtype(self.config.dtype)).itemsize
+    itemsize = jnp.dtype(dtypes.parse_dtype(self.config.dtype)).itemsize
     return self.config.data_size_bytes // itemsize // _COLUMNS
 
   def get_buffer_shape(self) -> tuple[int, ...]:
@@ -146,20 +148,15 @@ class _HostDeviceBenchmark(base.BaseBenchmark[HostDeviceParams]):
       return jax.sharding.PartitionSpec(None, _DEVICE_AXIS, None)
     return jax.sharding.PartitionSpec(_DEVICE_AXIS, None)
 
-  def get_device_to_measure(self) -> jax.Device:
-    return self.get_transfer_devices()[0]
-
   def get_run_identifier(self) -> str:
-    device_id = self.config.device_id
-    device_str = "all" if device_id == ALL_LOCAL_DEVICES else device_id
     return (
-        f"{self.config.transfer_backend}_dev{device_str}"
-        f"_size_{self.config.data_size_mib}mib"
+        f"{self.config.transfer_backend}_scope_{self.config.scope}"
+        f"_idx_{self.config.local_index}_size_{self.config.data_size_mib}mib"
     )
 
   def setup(self):
     self.mesh = jax.sharding.Mesh(
-        np.array(self.get_transfer_devices()), axis_names=(_DEVICE_AXIS,)
+        np.array(self.get_devices_to_measure()), axis_names=(_DEVICE_AXIS,)
     )
     self.sharding = jax.sharding.NamedSharding(
         self.mesh, self.get_partition_spec()
@@ -188,7 +185,7 @@ class _HostDeviceBenchmark(base.BaseBenchmark[HostDeviceParams]):
 
   def _make_host_shard(self) -> np.ndarray:
     """Returns a random host payload with the shape of one device shard."""
-    dtype = utils.parse_dtype(self.config.dtype)
+    dtype = dtypes.parse_dtype(self.config.dtype)
     shard_shape = (
         (1, self.rows_per_device, _COLUMNS)
         if self.use_tpu_sync
@@ -212,7 +209,7 @@ class _HostDeviceBenchmark(base.BaseBenchmark[HostDeviceParams]):
       raise ValueError("setup() must be called before creating device arrays.")
     shards = [
         jax.device_put(host_shard, device)
-        for device in self.get_transfer_devices()
+        for device in self.get_devices_to_measure()
     ]
     device_array = jax.make_array_from_single_device_arrays(
         self.get_buffer_shape(), self.sharding, shards
@@ -233,22 +230,43 @@ class _HostDeviceBenchmark(base.BaseBenchmark[HostDeviceParams]):
   def get_workload_metadata(self) -> dict[str, Any]:
     return {"num_devices": self.num_transfer_devices}
 
+  def get_peak_host_link_bandwidth(self) -> float | None:
+    """Returns the host link peak (GB/s) for the devices at `config.scope`.
+
+    The host PCIe link belongs to the chip and is shared by all of its
+    devices, so the peak is the per-chip link bandwidth times the number of
+    chips the measured devices span (`ceil(num_devices / devices_per_chip)`,
+    the same `devices_per_chip` the scope bandwidths are derived with). A
+    single device transferring alone (`scope="device"`) is therefore bounded
+    by its full chip link. The peak applies to both transfer backends;
+    host-side limits (root complex, NUMA, host DRAM) are not modeled.
+
+    Returns:
+      The peak bandwidth in decimal GB/s, or None (with a warning) when the
+      hardware spec has no PCIe host link.
+    """
+    pcie = self.hardware_spec.pcie if self.hardware_spec is not None else None
+    if pcie is None:
+      logging.warning(
+          "No PCIe host link bandwidth in the hardware spec; skipping"
+          " host-link roofline analysis."
+      )
+      return None
+    num_chips = math.ceil(
+        len(self.get_devices_to_measure()) / self.hardware_spec.devices_per_chip
+    )
+    return pcie.bandwidth_per_direction_gb_s * num_chips
+
   def calculate_throughput_metrics(
       self, latency_ms: float, prefix: constants.TimingDomain
   ) -> dict[str, Any]:
     total_bytes = self.get_total_bytes()
-    bytes_per_device = total_bytes / self.num_transfer_devices
     latency_s = latency_ms / 1000.0
     if latency_s == 0:
-      bandwidth_per_device_gb_s = float("inf")
-      bandwidth_per_host_gb_s = float("inf")
+      bandwidth_gb_s = float("inf")
     else:
-      bandwidth_per_device_gb_s = bytes_per_device / (latency_s * 1e9)
-      bandwidth_per_host_gb_s = total_bytes / (latency_s * 1e9)
-    return {
-        f"{prefix}_bandwidth_per_device_gb_s": bandwidth_per_device_gb_s,
-        f"{prefix}_bandwidth_per_host_gb_s": bandwidth_per_host_gb_s,
-    }
+      bandwidth_gb_s = total_bytes / (latency_s * 1e9)
+    return self.scope_bandwidth_metrics(prefix, bandwidth_gb_s)
 
 
 @registry.benchmark_registry.register("host_to_device")
@@ -264,7 +282,7 @@ class HostToDeviceBenchmark(_HostDeviceBenchmark):
   def generate_inputs(self) -> tuple[Any, ...]:
     if self.use_tpu_sync:
       return (self.device_array,)
-    dtype = utils.parse_dtype(self.config.dtype)
+    dtype = dtypes.parse_dtype(self.config.dtype)
     host_data = utils.random_bits_array(self.get_buffer_shape(), dtype)
     return (host_data,)
 

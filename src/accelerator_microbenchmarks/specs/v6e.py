@@ -10,7 +10,11 @@ V6E_HARDWARE_SPEC = schema.HardwareSpec(
     tflops=schema.TflopsSpec(
         peak_tflops_per_device={
             "bfloat16": 918.0,
-            "float32": 459.0,  # 2-pass BF16 emulation on MXU
+            # Same peak as bfloat16: MXU multiplies take bfloat16 inputs and
+            # accumulate in FP32, so a float32 matmul at JAX's default
+            # precision is one bfloat16 pass (see docs/BENCHMARKS.md).
+            # https://docs.cloud.google.com/tpu/docs/system-architecture-tpu-vm
+            "float32": 918.0,
             "float8_e5m2": 918.0,
             "float8_e4m3fn": 918.0,
             "int8": 1836.0,
@@ -22,5 +26,8 @@ V6E_HARDWARE_SPEC = schema.HardwareSpec(
         link_bw_per_direction_gb_s=100.0,
         wraparound_rule=schema.WraparoundRule.PER_DIM_GE_16,
     ),
+    # Host interface: PCIe Gen5 x8 per chip
+    # (https://docs.cloud.google.com/tpu/docs/v6e), raw 32 GT/s x 8 lanes / 8.
+    pcie=schema.PcieSpec(bandwidth_per_direction_gb_s=32.0),
     hbm=schema.HbmSpec(peak_bw_gb_s=1638.4),
 )

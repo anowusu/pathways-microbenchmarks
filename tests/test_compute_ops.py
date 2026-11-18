@@ -1,11 +1,15 @@
 """Unit tests for compute_ops.py."""
 
+import functools
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from accelerator_microbenchmarks.benchmarks import compute_ops
 from accelerator_microbenchmarks.core import constants
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import system
+from accelerator_microbenchmarks.kernels import quantize_transpose
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -16,123 +20,428 @@ def setUpModule():  # pylint: disable=invalid-name
   jax.config.update("jax_platform_name", "cpu")
 
 
-class SwiGLUBenchmarkTest(absltest.TestCase):
-  """Unit tests for SwiGLU benchmark."""
+class _ActivationTestBase(parameterized.TestCase):
+  """Shared setup for the activation/normalization benchmark tests."""
 
   def setUp(self):
     super().setUp()
     self.mock_mesh = jax.sharding.Mesh(
         np.array(jax.devices()), axis_names=("device",)
     )
+
+  def _make_benchmark(self, benchmark_cls, **params):
+    config = compute_ops.ComputeParams(**{"dim": 128, "batch": 32, **params})
+    bm = benchmark_cls(
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
+    )
+    bm.setup()
+    return bm
+
+
+class ComputeParamsTest(absltest.TestCase):
+  """Unit tests for ComputeParams."""
+
+  def test_default_mode_is_fwd(self):
+    self.assertEqual(compute_ops.ComputeParams().mode, compute_ops.PassMode.FWD)
+
+  def test_mode_is_coerced_from_string(self):
+    config = compute_ops.ComputeParams(mode="bwd")
+    self.assertEqual(config.mode, compute_ops.PassMode.BWD)
+
+  def test_invalid_mode_raises_error(self):
+    with self.assertRaisesRegex(ValueError, "Invalid mode"):
+      compute_ops.ComputeParams(mode="sideways")
+
+  def test_non_float_dtype_raises_error(self):
+    with self.assertRaises(ValueError):
+      compute_ops.ComputeParams(dtype="int8")
+
+
+class SwiGLUBenchmarkTest(_ActivationTestBase):
+  """Unit tests for SwiGLU benchmark."""
 
   def test_benchmark_registered(self):
     bm_class = registry.benchmark_registry.get_benchmark("swiglu")
     self.assertEqual(bm_class, compute_ops.SwiGLUBenchmark)
 
-  def test_generate_inputs(self):
-    params = {"dim": 128, "batch": 32}
-    config = compute_ops.ComputeParams(**params)
-    self.bm = compute_ops.SwiGLUBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
-    )
-    self.bm.setup()
-    (x,) = self.bm.generate_inputs()
+  def test_generate_inputs_fwd(self):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark)
+    (x,) = bm.generate_inputs()
     self.assertEqual(x.shape, (32, 128 * 2))
     self.assertEqual(x.dtype, jnp.bfloat16)
 
-  def test_run_op(self):
-    params = {"dim": 128, "batch": 32}
-    config = compute_ops.ComputeParams(**params)
-    self.bm = compute_ops.SwiGLUBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
-    )
-    self.bm.setup()
-    (x,) = self.bm.generate_inputs()
-    out = self.bm.run_op(x)
+  def test_generate_inputs_bwd(self):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark, mode="bwd")
+    x, dy = bm.generate_inputs()
+    self.assertEqual(x.shape, (32, 128 * 2))
+    self.assertEqual(dy.shape, (32, 128))
+    self.assertEqual(dy.dtype, jnp.bfloat16)
+
+  def test_generate_inputs_uses_dtype(self):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark, dtype="float32")
+    (x,) = bm.generate_inputs()
+    self.assertEqual(x.dtype, jnp.float32)
+
+  def test_run_op_fwd(self):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark, dtype="float32")
+    (x,) = bm.generate_inputs()
+    out = bm.run_op(x)
     self.assertEqual(out.shape, (32, 128))
-    self.assertEqual(out.dtype, jnp.bfloat16)
+    a, b = np.split(np.asarray(x, np.float64), 2, axis=-1)
+    expected = a / (1.0 + np.exp(-a)) * b
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
 
-  def test_get_total_bytes(self):
-    params = {"dim": 128, "batch": 32}
-    config = compute_ops.ComputeParams(**params)
-    self.bm = compute_ops.SwiGLUBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+  def test_run_op_bwd_matches_grad(self):
+    bm = self._make_benchmark(
+        compute_ops.SwiGLUBenchmark, dtype="float32", mode="bwd"
     )
-    # Read X (32 * 128 * 2 * 2) + Write Out (32 * 128 * 2)
-    # 16384 + 8192 = 24576
-    expected_bytes = 24576.0
-    self.assertAlmostEqual(self.bm.get_total_bytes(), expected_bytes)
+    x, dy = bm.generate_inputs()
+    dx = bm.run_op(x, dy)
+    self.assertEqual(dx.shape, x.shape)
 
-  def test_get_arithmetic_intensity(self):
-    params = {"dim": 128, "batch": 32}
-    config = compute_ops.ComputeParams(**params)
-    self.bm = compute_ops.SwiGLUBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
-    )
-    # flops = 32 * 128 * 10 = 40960
-    # intensity = 40960 / 24576 = 1.6666666666666667
-    expected_intensity = 40960 / 24576
+    def swiglu(x_):
+      a, b = jnp.split(x_, 2, axis=-1)
+      return jnp.sum(a * jax.nn.sigmoid(a) * b * dy)
+
+    np.testing.assert_allclose(dx, jax.grad(swiglu)(x), rtol=1e-5, atol=1e-5)
+
+  @parameterized.parameters(
+      # Read X (32 * 256 * 2) + write Y (32 * 128 * 2) = 24576.
+      ("fwd", 24576.0),
+      # Read X (16384) + read dY (8192) + write dX (16384) = 40960.
+      ("bwd", 40960.0),
+  )
+  def test_get_total_bytes(self, mode, expected_bytes):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark, mode=mode)
+    self.assertAlmostEqual(bm.get_total_bytes(), expected_bytes)
+
+  def test_get_total_bytes_matches_v7x_shape(self):
+    # v7x (M=4096, N=1024) moved 12 MiB.
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark, batch=4096, dim=512)
+    self.assertAlmostEqual(bm.get_total_bytes() / (1024 * 1024), 12.0)
+
+  @parameterized.parameters(("fwd", 1), ("bwd", 2))
+  def test_get_arithmetic_intensity(self, mode, flops_multiplier):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark, mode=mode)
     self.assertAlmostEqual(
-        self.bm.get_arithmetic_intensity(), expected_intensity
+        bm.get_arithmetic_intensity(),
+        32 * 128 * 10 * flops_multiplier / bm.get_total_bytes(),
     )
-    metrics = self.bm.calculate_metrics([10.0])
-    self.assertNotIn("intensity", metrics)
+
+  def test_calculate_metrics(self):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark)
+    metrics = bm.calculate_metrics([10.0])
     self.assertAlmostEqual(metrics["wall_clock_avg_ms"], 10.0)
-
-
-class RMSNormBenchmarkTest(absltest.TestCase):
-  """Unit tests for RMSNorm benchmark."""
-
-  def setUp(self):
-    super().setUp()
-    self.mock_mesh = jax.sharding.Mesh(
-        np.array(jax.devices()), axis_names=("device",)
+    self.assertAlmostEqual(
+        metrics["wall_clock_bandwidth_per_device_gb_s"], 24576.0 / 0.01 / 1e9
     )
+    self.assertAlmostEqual(metrics["total_bytes_mib"], 24576.0 / (1024 * 1024))
+    self.assertIn("intensity", metrics)
+
+  def test_run_identifier_includes_mode(self):
+    bm = self._make_benchmark(compute_ops.SwiGLUBenchmark, mode="bwd")
+    self.assertEqual(bm.get_run_identifier(), "batch_32_dim_128_bwd")
+
+
+class SigmoidBenchmarkTest(_ActivationTestBase):
+  """Unit tests for Sigmoid benchmark."""
+
+  def test_benchmark_registered(self):
+    bm_class = registry.benchmark_registry.get_benchmark("sigmoid")
+    self.assertEqual(bm_class, compute_ops.SigmoidBenchmark)
+
+  def test_generate_inputs_bwd(self):
+    bm = self._make_benchmark(compute_ops.SigmoidBenchmark, mode="bwd")
+    x, dy = bm.generate_inputs()
+    self.assertEqual(x.shape, (32, 128))
+    self.assertEqual(dy.shape, (32, 128))
+    self.assertEqual(x.dtype, jnp.bfloat16)
+
+  def test_run_op_fwd(self):
+    bm = self._make_benchmark(compute_ops.SigmoidBenchmark, dtype="float32")
+    (x,) = bm.generate_inputs()
+    out = bm.run_op(x)
+    expected = 1.0 / (1.0 + np.exp(-np.asarray(x, np.float64)))
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+  def test_run_op_bwd(self):
+    bm = self._make_benchmark(
+        compute_ops.SigmoidBenchmark, dtype="float32", mode="bwd"
+    )
+    x, dy = bm.generate_inputs()
+    dx = bm.run_op(x, dy)
+    y = 1.0 / (1.0 + np.exp(-np.asarray(x, np.float64)))
+    np.testing.assert_allclose(
+        dx, np.asarray(dy) * y * (1.0 - y), rtol=1e-5, atol=1e-5
+    )
+
+  @parameterized.parameters(
+      # Read X + write Y: 2 * 32 * 128 * 2 = 16384.
+      ("fwd", 16384.0),
+      # Read X + read dY + write dX: 3 * 32 * 128 * 2 = 24576.
+      ("bwd", 24576.0),
+  )
+  def test_get_total_bytes(self, mode, expected_bytes):
+    bm = self._make_benchmark(compute_ops.SigmoidBenchmark, mode=mode)
+    self.assertAlmostEqual(bm.get_total_bytes(), expected_bytes)
+
+  def test_calculate_metrics(self):
+    bm = self._make_benchmark(compute_ops.SigmoidBenchmark)
+    metrics = bm.calculate_metrics([10.0])
+    self.assertAlmostEqual(
+        metrics["wall_clock_bandwidth_per_device_gb_s"], 16384.0 / 0.01 / 1e9
+    )
+    self.assertAlmostEqual(metrics["intensity"], 32 * 128 * 4 / 16384.0)
+
+
+class RMSNormBenchmarkTest(_ActivationTestBase):
+  """Unit tests for RMSNorm benchmark."""
 
   def test_benchmark_registered(self):
     bm_class = registry.benchmark_registry.get_benchmark("rmsnorm")
     self.assertEqual(bm_class, compute_ops.RMSNormBenchmark)
 
-  def test_generate_inputs(self):
-    params = {"dim": 128, "batch": 32}
-    config = compute_ops.ComputeParams(**params)
-    self.bm = compute_ops.RMSNormBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
-    )
-    self.bm.setup()
-    x, w = self.bm.generate_inputs()
+  def test_generate_inputs_fwd(self):
+    bm = self._make_benchmark(compute_ops.RMSNormBenchmark)
+    x, w = bm.generate_inputs()
     self.assertEqual(x.shape, (32, 128))
     self.assertEqual(w.shape, (128,))
     self.assertEqual(x.dtype, jnp.bfloat16)
     self.assertEqual(w.dtype, jnp.bfloat16)
 
-  def test_run_op(self):
-    params = {"dim": 128, "batch": 32}
-    config = compute_ops.ComputeParams(**params)
-    self.bm = compute_ops.RMSNormBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
-    )
-    self.bm.setup()
-    x, w = self.bm.generate_inputs()
-    out = self.bm.run_op(x, w)
+  def test_generate_inputs_bwd(self):
+    bm = self._make_benchmark(compute_ops.RMSNormBenchmark, mode="bwd")
+    x, w, dy = bm.generate_inputs()
+    self.assertEqual(dy.shape, x.shape)
+    self.assertEqual(w.shape, (128,))
+
+  def test_run_op_fwd(self):
+    bm = self._make_benchmark(compute_ops.RMSNormBenchmark)
+    x, w = bm.generate_inputs()
+    out = bm.run_op(x, w)
     self.assertEqual(out.shape, (32, 128))
     self.assertEqual(out.dtype, jnp.bfloat16)
 
-  def test_get_total_bytes(self):
-    params = {"dim": 128, "batch": 32}
-    config = compute_ops.ComputeParams(**params)
-    self.bm = compute_ops.RMSNormBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+  def test_run_op_bwd_returns_input_and_weight_grads(self):
+    bm = self._make_benchmark(
+        compute_ops.RMSNormBenchmark, dtype="float32", mode="bwd"
     )
-    # Read X (32 * 128 * 2), Read W (128 * 2), Write Out (32 * 128 * 2)
-    # 8192 + 256 + 8192 = 16640
-    expected_bytes = 16640.0
-    self.assertAlmostEqual(self.bm.get_total_bytes(), expected_bytes)
-    metrics = self.bm.calculate_metrics([10.0])
+    x, w, dy = bm.generate_inputs()
+    dx, dw = bm.run_op(x, w, dy)
+    self.assertEqual(dx.shape, x.shape)
+    self.assertEqual(dw.shape, w.shape)
+
+    def rmsnorm(x_, w_):
+      rms = jnp.sqrt(jnp.mean(jnp.square(x_), axis=-1, keepdims=True) + 1e-6)
+      return jnp.sum(x_ / rms * w_ * dy)
+
+    expected_dx, expected_dw = jax.grad(rmsnorm, argnums=(0, 1))(x, w)
+    np.testing.assert_allclose(dx, expected_dx, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(dw, expected_dw, rtol=1e-4, atol=1e-4)
+
+  @parameterized.parameters(
+      # Read X (8192) + write Y (8192) + read W (256) = 16640.
+      ("fwd", 16640.0),
+      # Read X, dY + write dX (3 * 8192) + read W, write dW (2 * 256) = 25088.
+      ("bwd", 25088.0),
+  )
+  def test_get_total_bytes(self, mode, expected_bytes):
+    bm = self._make_benchmark(compute_ops.RMSNormBenchmark, mode=mode)
+    self.assertAlmostEqual(bm.get_total_bytes(), expected_bytes)
+
+  def test_calculate_metrics(self):
+    bm = self._make_benchmark(compute_ops.RMSNormBenchmark)
+    metrics = bm.calculate_metrics([10.0])
     self.assertAlmostEqual(metrics["wall_clock_avg_ms"], 10.0)
+    self.assertAlmostEqual(
+        metrics["wall_clock_bandwidth_per_device_gb_s"], 16640.0 / 0.01 / 1e9
+    )
 
 
-class RoPEBenchmarkTest(absltest.TestCase):
+class LayerNormBenchmarkTest(_ActivationTestBase):
+  """Unit tests for LayerNorm benchmark."""
+
+  @staticmethod
+  def _reference_layernorm(x, gamma, beta):
+    x = np.asarray(x, np.float64)
+    mean = x.mean(axis=-1, keepdims=True)
+    var = x.var(axis=-1, keepdims=True)
+    return (x - mean) / np.sqrt(var + 1e-6) * np.asarray(
+        gamma, np.float64
+    ) + np.asarray(beta, np.float64)
+
+  def test_benchmark_registered(self):
+    bm_class = registry.benchmark_registry.get_benchmark("layernorm")
+    self.assertEqual(bm_class, compute_ops.LayerNormBenchmark)
+
+  def test_generate_inputs_fwd(self):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark)
+    x, gamma, beta = bm.generate_inputs()
+    self.assertEqual(x.shape, (32, 128))
+    self.assertEqual(gamma.shape, (128,))
+    self.assertEqual(beta.shape, (128,))
+    self.assertEqual(x.dtype, jnp.bfloat16)
+    self.assertEqual(gamma.dtype, jnp.bfloat16)
+
+  def test_generate_inputs_bwd(self):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark, mode="bwd")
+    x, _, _, dy = bm.generate_inputs()
+    self.assertEqual(dy.shape, x.shape)
+    self.assertEqual(dy.dtype, jnp.bfloat16)
+
+  def test_run_op_fwd_matches_reference(self):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark, dtype="float32")
+    x, gamma, beta = bm.generate_inputs()
+    out = bm.run_op(x, gamma, beta)
+    self.assertEqual(out.shape, (32, 128))
+    self.assertEqual(out.dtype, jnp.float32)
+    np.testing.assert_allclose(
+        out, self._reference_layernorm(x, gamma, beta), rtol=1e-5, atol=1e-5
+    )
+
+  def test_run_op_fwd_keeps_bfloat16_output(self):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark)
+    x, gamma, beta = bm.generate_inputs()
+    out = bm.run_op(x, gamma, beta)
+    self.assertEqual(out.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.asarray(out, np.float32),
+        self._reference_layernorm(x, gamma, beta),
+        rtol=2e-2,
+        atol=2e-2,
+    )
+
+  def test_run_op_bwd_returns_input_and_affine_grads(self):
+    bm = self._make_benchmark(
+        compute_ops.LayerNormBenchmark, dtype="float32", mode="bwd"
+    )
+    x, gamma, beta, dy = bm.generate_inputs()
+    dx, dgamma, dbeta = bm.run_op(x, gamma, beta, dy)
+    self.assertEqual(dx.shape, x.shape)
+    self.assertEqual(dgamma.shape, gamma.shape)
+    self.assertEqual(dbeta.shape, beta.shape)
+
+    def layernorm(x_, gamma_, beta_):
+      mean = jnp.mean(x_, axis=-1, keepdims=True)
+      var = jnp.var(x_, axis=-1, keepdims=True)
+      y = (x_ - mean) / jnp.sqrt(var + 1e-6) * gamma_ + beta_
+      return jnp.sum(y * dy)
+
+    expected = jax.grad(layernorm, argnums=(0, 1, 2))(x, gamma, beta)
+    np.testing.assert_allclose(dx, expected[0], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(dgamma, expected[1], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(dbeta, expected[2], rtol=1e-4, atol=1e-4)
+
+  @parameterized.parameters(
+      # Read X (8192) + write Y (8192) + read gamma, beta (2 * 256) = 16896.
+      ("fwd", 16896.0),
+      # Read X, dY + write dX (3 * 8192) + read gamma, beta and write dGamma,
+      # dBeta (4 * 256) = 25600.
+      ("bwd", 25600.0),
+  )
+  def test_get_total_bytes(self, mode, expected_bytes):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark, mode=mode)
+    self.assertAlmostEqual(bm.get_total_bytes(), expected_bytes)
+
+  @parameterized.parameters(("fwd", 1), ("bwd", 2))
+  def test_get_arithmetic_intensity(self, mode, flops_multiplier):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark, mode=mode)
+    self.assertAlmostEqual(
+        bm.get_arithmetic_intensity(),
+        32 * 128 * 8 * flops_multiplier / bm.get_total_bytes(),
+    )
+
+  def test_calculate_metrics(self):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark)
+    metrics = bm.calculate_metrics([10.0])
+    self.assertAlmostEqual(metrics["wall_clock_avg_ms"], 10.0)
+    self.assertAlmostEqual(
+        metrics["wall_clock_bandwidth_per_device_gb_s"], 16896.0 / 0.01 / 1e9
+    )
+    self.assertAlmostEqual(metrics["total_bytes_mib"], 16896.0 / (1024 * 1024))
+
+  def test_run_identifier_includes_mode(self):
+    bm = self._make_benchmark(compute_ops.LayerNormBenchmark, mode="bwd")
+    self.assertEqual(bm.get_run_identifier(), "batch_32_dim_128_bwd")
+
+
+class SoftmaxBenchmarkTest(_ActivationTestBase):
+  """Unit tests for Softmax benchmark."""
+
+  @staticmethod
+  def _reference_softmax(x):
+    x = np.asarray(x, np.float64)
+    e = np.exp(x - x.max(axis=-1, keepdims=True))
+    return e / e.sum(axis=-1, keepdims=True)
+
+  def test_benchmark_registered(self):
+    bm_class = registry.benchmark_registry.get_benchmark("softmax")
+    self.assertEqual(bm_class, compute_ops.SoftmaxBenchmark)
+
+  def test_generate_inputs_bwd(self):
+    bm = self._make_benchmark(compute_ops.SoftmaxBenchmark, mode="bwd")
+    x, dy = bm.generate_inputs()
+    self.assertEqual(x.shape, (32, 128))
+    self.assertEqual(dy.shape, (32, 128))
+    self.assertEqual(x.dtype, jnp.bfloat16)
+
+  def test_run_op_fwd_matches_reference(self):
+    bm = self._make_benchmark(compute_ops.SoftmaxBenchmark, dtype="float32")
+    (x,) = bm.generate_inputs()
+    out = bm.run_op(x)
+    self.assertEqual(out.dtype, jnp.float32)
+    np.testing.assert_allclose(
+        out, self._reference_softmax(x), rtol=1e-5, atol=1e-6
+    )
+    np.testing.assert_allclose(np.sum(out, axis=-1), 1.0, rtol=1e-5)
+
+  def test_run_op_fwd_keeps_bfloat16_output(self):
+    bm = self._make_benchmark(compute_ops.SoftmaxBenchmark)
+    (x,) = bm.generate_inputs()
+    out = bm.run_op(x)
+    self.assertEqual(out.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        np.asarray(out, np.float32),
+        self._reference_softmax(x),
+        rtol=2e-2,
+        atol=2e-3,
+    )
+
+  def test_run_op_bwd_matches_reference(self):
+    bm = self._make_benchmark(
+        compute_ops.SoftmaxBenchmark, dtype="float32", mode="bwd"
+    )
+    x, dy = bm.generate_inputs()
+    dx = bm.run_op(x, dy)
+    self.assertEqual(dx.shape, x.shape)
+    # dX = Y * (dY - sum(dY * Y)).
+    y = self._reference_softmax(x)
+    dy = np.asarray(dy, np.float64)
+    expected = y * (dy - np.sum(dy * y, axis=-1, keepdims=True))
+    np.testing.assert_allclose(dx, expected, rtol=1e-4, atol=1e-5)
+
+  @parameterized.parameters(
+      # Read X + write Y: 2 * 32 * 128 * 2 = 16384.
+      ("fwd", 16384.0),
+      # Read X + read dY + write dX: 3 * 32 * 128 * 2 = 24576.
+      ("bwd", 24576.0),
+  )
+  def test_get_total_bytes(self, mode, expected_bytes):
+    bm = self._make_benchmark(compute_ops.SoftmaxBenchmark, mode=mode)
+    self.assertAlmostEqual(bm.get_total_bytes(), expected_bytes)
+
+  def test_calculate_metrics(self):
+    bm = self._make_benchmark(compute_ops.SoftmaxBenchmark)
+    metrics = bm.calculate_metrics([10.0])
+    self.assertAlmostEqual(
+        metrics["wall_clock_bandwidth_per_device_gb_s"], 16384.0 / 0.01 / 1e9
+    )
+    self.assertAlmostEqual(metrics["intensity"], 32 * 128 * 5 / 16384.0)
+
+
+class RoPEBenchmarkTest(parameterized.TestCase):
   """Unit tests for RoPE benchmark."""
 
   def setUp(self):
@@ -141,47 +450,133 @@ class RoPEBenchmarkTest(absltest.TestCase):
         np.array(jax.devices()), axis_names=("device",)
     )
 
+  def _make_benchmark(self, **params):
+    config = compute_ops.RoPEParams(
+        **{"seq_len": 16, "head_dim": 8, "batch": 2, "heads": 3, **params}
+    )
+    bm = compute_ops.RoPEBenchmark(
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
+    )
+    bm.setup()
+    return bm
+
+  @staticmethod
+  def _reference_rope(x, table, batch, seq_len, heads, head_dim):
+    """Per-head rotate_half RoPE in float64 numpy."""
+    x = np.asarray(x, np.float64).reshape(batch, seq_len, heads, head_dim)
+    table = np.asarray(table, np.float64)
+    half = head_dim // 2
+    cos = table[None, :, None, :half]
+    sin = table[None, :, None, half:]
+    x1, x2 = x[..., :half], x[..., half:]
+    out = np.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
+    return out.reshape(batch * seq_len, heads * head_dim)
+
   def test_benchmark_registered(self):
     bm_class = registry.benchmark_registry.get_benchmark("rope")
     self.assertEqual(bm_class, compute_ops.RoPEBenchmark)
 
-  def test_generate_inputs(self):
-    params = {"seq_len": 64, "head_dim": 64, "batch": 8, "heads": 16}
-    config = compute_ops.RoPEParams(**params)
-    self.bm = compute_ops.RoPEBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
-    )
-    self.bm.setup()
-    x, freq_cis = self.bm.generate_inputs()
-    self.assertEqual(x.shape, (8, 16, 64, 32))
-    self.assertEqual(freq_cis.shape, (1, 1, 64, 32))
-    self.assertEqual(x.dtype, jnp.complex64)
-    self.assertEqual(freq_cis.dtype, jnp.complex64)
+  def test_default_mode_is_fwd(self):
+    self.assertEqual(compute_ops.RoPEParams().mode, compute_ops.PassMode.FWD)
 
-  def test_run_op(self):
-    params = {"seq_len": 64, "head_dim": 64, "batch": 8, "heads": 16}
-    config = compute_ops.RoPEParams(**params)
-    self.bm = compute_ops.RoPEBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
-    )
-    self.bm.setup()
-    x, freq_cis = self.bm.generate_inputs()
-    out = self.bm.run_op(x, freq_cis)
-    self.assertEqual(out.shape, (8, 16, 64, 32))
-    self.assertEqual(out.dtype, jnp.complex64)
+  def test_mode_is_coerced_from_string(self):
+    config = compute_ops.RoPEParams(mode="bwd")
+    self.assertEqual(config.mode, compute_ops.PassMode.BWD)
 
-  def test_get_total_bytes(self):
-    params = {"seq_len": 64, "head_dim": 64, "batch": 8, "heads": 16}
-    config = compute_ops.RoPEParams(**params)
-    self.bm = compute_ops.RoPEBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+  def test_invalid_mode_raises_error(self):
+    with self.assertRaisesRegex(ValueError, "Invalid mode"):
+      compute_ops.RoPEParams(mode="sideways")
+
+  def test_odd_head_dim_raises_error(self):
+    with self.assertRaisesRegex(ValueError, "head_dim must be even"):
+      compute_ops.RoPEParams(head_dim=7)
+
+  def test_non_float_dtype_raises_error(self):
+    with self.assertRaises(ValueError):
+      compute_ops.RoPEParams(dtype="int8")
+
+  def test_generate_inputs_fwd(self):
+    bm = self._make_benchmark()
+    x, table = bm.generate_inputs()
+    self.assertEqual(x.shape, (2 * 16, 3 * 8))
+    self.assertEqual(x.dtype, jnp.bfloat16)
+    self.assertEqual(table.shape, (16, 8))
+    self.assertEqual(table.dtype, jnp.float32)
+    # Position 0 has angle 0: cos = 1, sin = 0.
+    np.testing.assert_allclose(table[0], [1.0] * 4 + [0.0] * 4)
+
+  def test_generate_inputs_bwd(self):
+    bm = self._make_benchmark(mode="bwd")
+    x, table, dy = bm.generate_inputs()
+    self.assertEqual(dy.shape, x.shape)
+    self.assertEqual(dy.dtype, jnp.bfloat16)
+    self.assertEqual(table.dtype, jnp.float32)
+
+  def test_run_op_fwd_matches_reference(self):
+    bm = self._make_benchmark(dtype="float32")
+    x, table = bm.generate_inputs()
+    out = bm.run_op(x, table)
+    self.assertEqual(out.shape, x.shape)
+    self.assertEqual(out.dtype, jnp.float32)
+    expected = self._reference_rope(x, table, 2, 16, 3, 8)
+    np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+  def test_run_op_fwd_keeps_bfloat16_output(self):
+    bm = self._make_benchmark()
+    x, table = bm.generate_inputs()
+    out = bm.run_op(x, table)
+    self.assertEqual(out.dtype, jnp.bfloat16)
+    expected = self._reference_rope(x, table, 2, 16, 3, 8)
+    np.testing.assert_allclose(
+        np.asarray(out, np.float32), expected, rtol=2e-2, atol=2e-2
     )
-    # batch * heads * seq_len * head_dim//2 * 8 * 2
-    # 8 * 16 * 64 * 32 * 8 * 2 = 4194304
-    expected_bytes = 4194304.0
-    self.assertAlmostEqual(self.bm.get_total_bytes(), expected_bytes)
-    metrics = self.bm.calculate_metrics([10.0])
+
+  def test_run_op_bwd_is_inverse_rotation(self):
+    bm = self._make_benchmark(dtype="float32", mode="bwd")
+    x, table, dy = bm.generate_inputs()
+    dx = bm.run_op(x, table, dy)
+    self.assertEqual(dx.shape, x.shape)
+    self.assertEqual(dx.dtype, jnp.float32)
+    # The VJP of a rotation is the rotation by the negated angle.
+    half = 4
+    inverse_table = np.concatenate(
+        [np.asarray(table[:, :half]), -np.asarray(table[:, half:])], axis=-1
+    )
+    expected = self._reference_rope(dy, inverse_table, 2, 16, 3, 8)
+    np.testing.assert_allclose(dx, expected, rtol=1e-5, atol=1e-5)
+
+  @parameterized.parameters("fwd", "bwd")
+  def test_get_total_bytes(self, mode):
+    bm = self._make_benchmark(mode=mode)
+    # Activations in + out: 2 * (2 * 16 * 3 * 8) * 2 bytes = 3072.
+    # f32 table: 16 * 8 * 4 bytes = 512.
+    self.assertAlmostEqual(bm.get_total_bytes(), 3584.0)
+
+  def test_get_total_bytes_matches_v7x_shape(self):
+    # v7x (M=1024, N=1792) moved 7.5 MiB.
+    bm = self._make_benchmark(batch=1, seq_len=1024, heads=14, head_dim=128)
+    self.assertAlmostEqual(bm.get_total_bytes() / (1024 * 1024), 7.5)
+
+  def test_get_arithmetic_intensity(self):
+    bm = self._make_benchmark()
+    self.assertAlmostEqual(
+        bm.get_arithmetic_intensity(), (2 * 16 * 3 * 8 * 3) / 3584.0
+    )
+
+  def test_calculate_metrics(self):
+    bm = self._make_benchmark()
+    metrics = bm.calculate_metrics([10.0])
     self.assertAlmostEqual(metrics["wall_clock_avg_ms"], 10.0)
+    self.assertAlmostEqual(
+        metrics["wall_clock_bandwidth_per_device_gb_s"], 3584.0 / 0.01 / 1e9
+    )
+    self.assertAlmostEqual(metrics["total_bytes_mib"], 3584.0 / (1024 * 1024))
+
+  def test_run_identifier_includes_mode(self):
+    bm = self._make_benchmark(mode="bwd")
+    self.assertEqual(bm.get_run_identifier(), "b_2_h_3_s_16_d_8_bwd")
 
 
 class QuantizationBenchmarkTest(parameterized.TestCase):
@@ -201,7 +596,9 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
     params = {"m": 64, "n": 128}
     config = compute_ops.QuantParams(**params)
     self.bm = compute_ops.QuantizationBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
     )
     self.bm.setup()
     (x,) = self.bm.generate_inputs()
@@ -212,7 +609,9 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
     params = {"m": 64, "n": 128}
     config = compute_ops.QuantParams(**params)
     self.bm = compute_ops.QuantizationBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
     )
     self.bm.setup()
     (x,) = self.bm.generate_inputs()
@@ -288,13 +687,14 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
       ("int_scale", "scale_dtype", "int8"),
       ("complex_scale", "scale_dtype", "complex64"),
       ("fp8_scale", "scale_dtype", "float8_e4m3fn"),
-      ("e8m0_scale", "scale_dtype", "float8_e8m0fnu"),
       ("fp4_scale", "scale_dtype", "float4_e2m1fn"),
   )
   def test_params_reject_unsupported_dtypes(self, field, dtype):
     """Verifies the input, scale and quant dtype constraints are enforced."""
     with self.assertRaisesRegex(
-        ValueError, f"^{field}: Unsupported dtype: '{dtype}'"
+        ValueError,
+        rf"^{field}: Unsupported dtype '{dtype}'\. Supported dtypes for"
+        rf" {field}:",
     ):
       compute_ops.QuantParams(**{field: dtype})
 
@@ -351,7 +751,9 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
     params = {"m": 64, "n": 128}
     config = compute_ops.QuantParams(**params)
     self.bm = compute_ops.QuantizationBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
     )
     # Read X (64 * 128 * 2), Write Out (64 * 128 * 1), Write SF (64 * 2)
     # 16384 + 8192 + 128 = 24704
@@ -362,6 +764,45 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
     self.assertIn("wall_clock_bandwidth_per_device_gb_s", metrics)
     self.assertGreater(metrics["wall_clock_bandwidth_per_device_gb_s"], 0.0)
 
+  def test_calculate_throughput_metrics_zero_latency_warns(self):
+    """Verifies non-positive latency logs a warning and returns inf."""
+    config = compute_ops.QuantParams(m=64, n=128)
+    bm = compute_ops.QuantizationBenchmark(
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
+    )
+    with self.assertLogs(level="WARNING") as cm:
+      metrics = bm.calculate_throughput_metrics(
+          0.0, constants.TimingDomain.WALL_CLOCK
+      )
+    self.assertEqual(
+        metrics["wall_clock_bandwidth_per_device_gb_s"], float("inf")
+    )
+    self.assertIn("Non-positive latency_s", "\n".join(cm.output))
+
+
+class QuantizeTransposeBenchmarkTest(parameterized.TestCase):
+  """Unit tests for the transposed quantization (Pallas kernel) benchmark."""
+
+  def setUp(self):
+    super().setUp()
+    self.mock_mesh = jax.sharding.Mesh(
+        np.array(jax.devices()), axis_names=("device",)
+    )
+
+  def test_benchmark_registered(self):
+    bm_class = registry.benchmark_registry.get_benchmark("quantize_transpose")
+    self.assertEqual(bm_class, compute_ops.QuantizeTransposeBenchmark)
+
+  def test_setup_without_mesh_raises(self):
+    bm = compute_ops.QuantizeTransposeBenchmark(
+        config=compute_ops.QuantParams(m=64, n=128),
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+    )
+    with self.assertRaisesRegex(ValueError, "Mesh not initialized"):
+      bm.setup()
+
   @parameterized.named_parameters(
       ("fp8_bf16_sf", "float8_e4m3fn", "bfloat16"),
       ("fp4_bf16_sf", "float4_e2m1fn", "bfloat16"),
@@ -369,29 +810,17 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
       ("fp8_fp32_sf", "float8_e4m3fn", "float32"),
       ("int4_fp32_sf", "int4", "float32"),
   )
-  def test_transpose_matches_rowwise_quantize_of_transposed_input(
+  def test_matches_rowwise_quantize_of_transposed_input(
       self, quant_dtype, scale_dtype
   ):
-    """Verifies transpose=True on X equals transpose=False on X^T."""
-    bm_t = compute_ops.QuantizationBenchmark(
+    """Verifies the kernel on X equals QuantizationBenchmark on X^T."""
+    bm_t = compute_ops.QuantizeTransposeBenchmark(
         config=compute_ops.QuantParams(
-            m=64,
-            n=128,
-            quant_dtype=quant_dtype,
-            scale_dtype=scale_dtype,
-            transpose=True,
+            m=64, n=128, quant_dtype=quant_dtype, scale_dtype=scale_dtype
         ),
         hardware_spec=system.TPU7X_HARDWARE_SPEC,
         mesh=self.mock_mesh,
     )
-    bm_t.setup()
-    (x,) = bm_t.generate_inputs()
-    out_t, sf_t = bm_t.run_op(x)
-    self.assertEqual(out_t.shape, (128, 64))
-    self.assertEqual(out_t.dtype, jnp.dtype(quant_dtype))
-    self.assertEqual(sf_t.shape, (128, 1))
-    self.assertEqual(sf_t.dtype, jnp.dtype(scale_dtype))
-
     bm_ref = compute_ops.QuantizationBenchmark(
         config=compute_ops.QuantParams(
             m=128, n=64, quant_dtype=quant_dtype, scale_dtype=scale_dtype
@@ -399,8 +828,24 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
         hardware_spec=system.TPU7X_HARDWARE_SPEC,
         mesh=self.mock_mesh,
     )
+    bm_t.setup()
     bm_ref.setup()
+
+    (x,) = bm_t.generate_inputs()
+    with mock.patch.object(
+        quantize_transpose,
+        "quantize_transpose",
+        functools.partial(
+            quantize_transpose.quantize_transpose, interpret=True
+        ),
+    ):
+      out_t, sf_t = bm_t.run_op(x)
     out_ref, sf_ref = bm_ref.run_op(x.T)
+
+    self.assertEqual(out_t.shape, (128, 64))
+    self.assertEqual(out_t.dtype, jnp.dtype(quant_dtype))
+    self.assertEqual(sf_t.shape, (128, 1))
+    self.assertEqual(sf_t.dtype, jnp.dtype(scale_dtype))
     np.testing.assert_array_equal(
         np.asarray(out_t, dtype=np.float32),
         np.asarray(out_ref, dtype=np.float32),
@@ -419,61 +864,27 @@ class QuantizationBenchmarkTest(parameterized.TestCase):
       # 16384 + (64 * 128 * 0.5) + (128 * 2) = 20736
       ("int4_bf16_sf", "int4", "bfloat16", 20736.0),
   )
-  def test_transpose_total_bytes_identifier_and_metadata(
+  def test_total_bytes_identifier_and_metadata(
       self, quant_dtype, scale_dtype, expected_bytes
   ):
-    """Verifies N-length scales in bytes, the identifier suffix, and metadata."""
-    bm = compute_ops.QuantizationBenchmark(
+    """Verifies N-length scales in bytes, the identifier, and metadata."""
+    bm = compute_ops.QuantizeTransposeBenchmark(
         config=compute_ops.QuantParams(
-            m=64,
-            n=128,
-            quant_dtype=quant_dtype,
-            scale_dtype=scale_dtype,
-            transpose=True,
+            m=64, n=128, quant_dtype=quant_dtype, scale_dtype=scale_dtype
         ),
         hardware_spec=system.TPU7X_HARDWARE_SPEC,
         mesh=self.mock_mesh,
     )
     self.assertAlmostEqual(bm.get_total_bytes(), expected_bytes)
     self.assertEqual(
-        bm.get_run_identifier(),
-        f"m_64_n_128_{quant_dtype}_sf_{scale_dtype}_transpose",
+        bm.get_run_identifier(), f"m_64_n_128_{quant_dtype}_sf_{scale_dtype}"
     )
     metadata = bm.get_workload_metadata()
     self.assertAlmostEqual(
         metadata["total_bytes_mib"], expected_bytes / (1024 * 1024)
     )
-
-  def test_transpose_defaults_to_false(self):
-    """Verifies the default keeps the non-transposed identifier."""
-    bm = compute_ops.QuantizationBenchmark(
-        config=compute_ops.QuantParams(m=64, n=128),
-        hardware_spec=system.TPU7X_HARDWARE_SPEC,
-        mesh=self.mock_mesh,
-    )
-    self.assertFalse(bm.config.transpose)
-    self.assertEqual(
-        bm.get_run_identifier(), "m_64_n_128_float8_e4m3fn_sf_bfloat16"
-    )
-
-  def test_calculate_throughput_metrics_zero_latency_warns(self):
-    """Verifies zero/negative latency logs a warning and returns inf bandwidth."""
-    config = compute_ops.QuantParams(m=64, n=128)
-    bm = compute_ops.QuantizationBenchmark(
-        config=config,
-        hardware_spec=system.TPU7X_HARDWARE_SPEC,
-        mesh=self.mock_mesh,
-    )
-    with self.assertLogs(level="WARNING") as cm:
-      metrics = bm.calculate_throughput_metrics(
-          0.0, constants.TimingDomain.WALL_CLOCK
-      )
-    self.assertEqual(
-        metrics["wall_clock_bandwidth_per_device_gb_s"], float("inf")
-    )
-    self.assertTrue(
-        any("Non-positive latency_s" in msg for msg in cm.output)
-    )
+    self.assertEqual(metadata["block_m"], 64)
+    self.assertEqual(metadata["block_n"], 128)
 
 
 class AddBenchmarkTest(absltest.TestCase):
@@ -493,7 +904,9 @@ class AddBenchmarkTest(absltest.TestCase):
     params = {"size": 1024}
     config = compute_ops.AddParams(**params)
     self.bm = compute_ops.AddBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
     )
     self.bm.setup()
     x, y = self.bm.generate_inputs()
@@ -506,7 +919,9 @@ class AddBenchmarkTest(absltest.TestCase):
     params = {"size": 1024}
     config = compute_ops.AddParams(**params)
     self.bm = compute_ops.AddBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
     )
     self.bm.setup()
     x, y = self.bm.generate_inputs()
@@ -518,7 +933,9 @@ class AddBenchmarkTest(absltest.TestCase):
     params = {"size": 1024}
     config = compute_ops.AddParams(**params)
     self.bm = compute_ops.AddBenchmark(
-        config=config, hardware_spec=system.TPU7X_HARDWARE_SPEC, mesh=self.mock_mesh
+        config=config,
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+        mesh=self.mock_mesh,
     )
     # Read X, Read Y, Write Z
     # 1024 * 2 * 3 = 6144

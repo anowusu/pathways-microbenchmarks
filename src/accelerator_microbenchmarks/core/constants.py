@@ -14,6 +14,14 @@ class ParamEnum(enum.StrEnum):
     return ", ".join(cls)
 
 
+class Scope(ParamEnum):
+  """Measurement and device-selection scope for benchmarks."""
+
+  DEVICE = "device"
+  CHIP = "chip"
+  HOST = "host"
+
+
 class RooflineMode(str, enum.Enum):
   """Roofline calculation mode for microbenchmarks.
 
@@ -29,18 +37,32 @@ class RooflineMode(str, enum.Enum):
       sizes will report lower efficiency by construction due to fixed launch
       latency and bandwidth ramp; this is expected behavior rather than a
       performance regression.
-    NETWORK_ICI: ICI-bound roofline analysis comparing the measured
-      collective bus bandwidth per chip against a collective-specific
-      theoretical ICI peak supplied by the benchmark (currently only
-      `all_to_all`, whose peak is bounded by bisection bandwidth). Emits
-      `peak_ici_bandwidth_per_chip_gb_s` and
-      `<domain>_ici_roofline_efficiency_pct`.
+    NETWORK_ICI: ICI-bound roofline analysis comparing the measured collective
+      bus bandwidth per chip against a collective-specific theoretical ICI peak
+      supplied by the benchmark (currently only `all_to_all`, whose peak is
+      bounded by bisection bandwidth). Emits `peak_ici_bandwidth_per_chip_gb_s`
+      and `<domain>_ici_roofline_efficiency_pct`.
+    HOST_DEVICE_LINK: Host<->device transfer roofline: the measured bandwidth
+      at the active measurement scope is compared against the host link peak
+      of the chips involved, as supplied by the benchmark. Emits
+      `peak_link_bandwidth_per_<scope>_gb_s`, `roofline_bound_by`
+      (`TransferLink.PCIE`), and `<domain>_roofline_efficiency_pct`.
   """
 
   NONE = "none"
   COMPUTE = "compute"
   MEMORY_HBM = "memory_hbm"
   NETWORK_ICI = "network_ici"
+  HOST_DEVICE_LINK = "host_device_link"
+
+
+class TransferLink(enum.StrEnum):
+  """Physical link bounding a host<->device transfer.
+
+  The values are the strings emitted in the `roofline_bound_by` metric.
+  """
+
+  PCIE = "pcie"
 
 
 class TimingDomain(enum.StrEnum):

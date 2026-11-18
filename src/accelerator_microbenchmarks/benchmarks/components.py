@@ -5,10 +5,10 @@ from typing import Any, Callable, Sequence
 
 from accelerator_microbenchmarks.core import base
 from accelerator_microbenchmarks.core import constants
+from accelerator_microbenchmarks.core import dtypes
 from accelerator_microbenchmarks.core import registry
 from accelerator_microbenchmarks.core import report
 from accelerator_microbenchmarks.core import system
-from accelerator_microbenchmarks.core import utils
 import jax
 import jax.numpy as jnp
 
@@ -18,8 +18,9 @@ class TransformerLayerParams(base.SingleDtypeBenchmarkParams):
   # Excluded dtypes:
   # * complex: jax.nn.standardize (the norm proxy) clips the variance, and
   #   complex values have no ordering.
-  # * int / bool: input generation fails (jax.random.normal needs a float
-  #   dtype).
+  # * int / bool: the layer is floating-point; jax.nn.standardize promotes
+  #   integer inputs to float32, so it would run in float32 while TFLOPs are
+  #   reported against the integer peak.
   DTYPE_CONSTRAINTS = {"dtype": (jnp.floating,)}
 
   model_dim: int = dataclasses.field(
@@ -128,7 +129,7 @@ class TransformerLayerMoE(ComponentBenchmark):
     batch = 1  # Microbatch size 1 as requested
 
     key = jax.random.PRNGKey(0)
-    dtype = utils.parse_dtype(self.config.dtype)
+    dtype = dtypes.parse_dtype(self.config.dtype)
     x = jax.random.normal(key, (batch, seq_len, model_dim), dtype=dtype)
 
     # Large-scale weights that would normally be sharded via FSDP/TP
@@ -204,7 +205,7 @@ class TransformerLayerMoE(ComponentBenchmark):
   def get_total_bytes(self) -> float:
     model_dim = self.config.model_dim
     seq_len = self.config.mslen
-    dtype = utils.parse_dtype(self.config.dtype)
+    dtype = dtypes.parse_dtype(self.config.dtype)
     itemsize = jnp.dtype(dtype).itemsize
 
     x_size = seq_len * model_dim * itemsize

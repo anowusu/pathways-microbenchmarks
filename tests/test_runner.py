@@ -1,6 +1,8 @@
 """Unit tests for the benchmark execution runner (runner.py)."""
 
+import io
 import os
+import sys
 import tempfile
 from unittest import mock
 
@@ -93,9 +95,10 @@ class TestRunner(absltest.TestCase):
     self.assertNotIn("LIBTPU_INIT_ARGS", os.environ)
 
   def test_set_xla_flags_missing_file(self):
-    runner.set_xla_flags(
-        [{"name": "test_op_flags_only"}], "non_existent_file.yaml"
-    )
+    with self.assertRaises(FileNotFoundError):
+      runner.set_xla_flags(
+          [{"name": "test_op_flags_only"}], "non_existent_file.yaml"
+      )
     self.assertNotIn("LIBTPU_INIT_ARGS", os.environ)
 
   def test_validate_op_flags_yaml_files(self):
@@ -171,6 +174,18 @@ class TestRunner(absltest.TestCase):
     self.assertIsNotNone(init_args)
     self.assertIn("--xla_jf_debug_level=3", init_args)
 
+  def test_set_xla_flags_dcn_all_reduce(self):
+    """Verifies dcn_all_reduce resolves unified flags and env in op_flags.yaml."""
+    os.environ.pop("LIBTPU_INIT_ARGS", None)
+    os.environ.pop("GLIBC_TUNABLES", None)
+    runner.set_xla_flags([{"name": "dcn_all_reduce"}], None)
+    init_args = os.environ.get("LIBTPU_INIT_ARGS", "")
+    self.assertIn("--xla_tpu_use_enhanced_launch_barrier=false", init_args)
+    self.assertIn(
+        "--megascale_grpc_premap_memory_bytes=137438953472", init_args
+    )
+    self.assertEqual(os.environ.get("GLIBC_TUNABLES"), "glibc.pthread.rseq=0")
+
   def test_set_xla_flags_default_path_google3(self):
     """Verifies that set_xla_flags resolves canonical benchmark names."""
     os.environ.pop("LIBTPU_INIT_ARGS", None)
@@ -206,6 +221,141 @@ class TestRunner(absltest.TestCase):
       runner.init_jax_distributed()
       mock_init.assert_called_once()
 
+  def test_init_jax_distributed_skips_coordinator_for_standalone_host(self):
+    with mock.patch.object(runner.jax.distributed, "initialize") as mock_init:
+      runner.init_jax_distributed(distributed=False)
+      mock_init.assert_not_called()
+
+  # Fake registry for the standalone-init tests: `requires_ici` per name.
+  _FAKE_REQUIRES_ICI = {
+      "gemm": False,
+      "hbm": False,
+      "all_reduce": True,
+      "device_to_device": True,
+  }
+
+  def _fake_get_benchmark(self, name):
+    return mock.MagicMock(
+        requires_ici=self._FAKE_REQUIRES_ICI[name], __name__=name
+    )
+
+  def _run_benchmarks_with_stages_mocked(self, task_names, **kwargs):
+    """Runs run_benchmarks for `task_names` with TPU-touching stages mocked.
+
+    Returns the ordered list of init stages invoked and the captured stdout.
+    """
+    calls = []
+    params = base.BaseBenchmarkParams(warmup_tries=1, num_runs=1)
+    with mock.patch.object(
+        runner, "set_xla_flags", side_effect=lambda *a, **k: calls.append("xla")
+    ), mock.patch.object(
+        runner.standalone_host,
+        "configure_standalone_host",
+        side_effect=lambda: calls.append("standalone_host"),
+    ), mock.patch.object(
+        runner,
+        "init_jax_distributed",
+        side_effect=lambda **kw: calls.append(
+            "jax" if kw.get("distributed", True) else "jax_local"
+        ),
+    ), mock.patch.object(
+        runner.platform,
+        "get_platform_info",
+        return_value=mock.MagicMock(tpu_type=system.TpuVersion.TPU7X),
+    ), mock.patch.object(
+        runner.system, "get_hardware_spec"
+    ), mock.patch.object(
+        runner.benchmark_loader, "load_all_benchmarks"
+    ), mock.patch.object(
+        runner.registry.benchmark_registry,
+        "get_benchmark",
+        side_effect=self._fake_get_benchmark,
+    ), mock.patch.object(
+        runner.report, "report_results"
+    ), mock.patch.object(
+        sys, "stdout", new=io.StringIO()
+    ) as fake_out:
+      runner.run_benchmarks(
+          tasks=[(name, params) for name in task_names],
+          output_dir=self.temp_dir.name,
+          **kwargs,
+      )
+    return calls, fake_out.getvalue()
+
+  def test_run_benchmarks_standalone_host_init_off_by_default(self):
+    """Without the flag, standalone host configuration is never applied."""
+    calls, _ = self._run_benchmarks_with_stages_mocked(["gemm"])
+    self.assertEqual(calls, ["xla", "jax"])
+
+  def test_run_benchmarks_standalone_host_init_order(self):
+    """Standalone host env is applied after op_flags and before JAX init."""
+    calls, _ = self._run_benchmarks_with_stages_mocked(
+        ["gemm", "hbm"], standalone_host_init=True
+    )
+    self.assertEqual(calls, ["xla", "standalone_host", "jax_local"])
+
+  def test_run_benchmarks_standalone_host_init_rejects_requires_ici(self):
+    """Benchmarks with `requires_ici` raise before any TPU init is touched."""
+    with self.assertRaises(ValueError) as ctx:
+      self._run_benchmarks_with_stages_mocked(
+          ["gemm", "device_to_device", "all_reduce"], standalone_host_init=True
+      )
+    message = str(ctx.exception)
+    self.assertIn(
+        "standalone_host_init is not supported for"
+        " ['all_reduce', 'device_to_device']",
+        message,
+    )
+    self.assertIn("inter-device (ICI)", message)
+    self.assertNotIn("gemm", message)
+
+  def test_run_benchmarks_standalone_host_init_raises_before_configure(self):
+    """The ValueError fires before configure_standalone_host and JAX init."""
+    calls = []
+    params = base.BaseBenchmarkParams(warmup_tries=1, num_runs=1)
+    with mock.patch.object(
+        runner, "set_xla_flags", side_effect=lambda *a, **k: calls.append("xla")
+    ), mock.patch.object(
+        runner.standalone_host,
+        "configure_standalone_host",
+        side_effect=lambda: calls.append("standalone_host"),
+    ), mock.patch.object(
+        runner,
+        "init_jax_distributed",
+        side_effect=lambda **kw: calls.append("jax"),
+    ), mock.patch.object(
+        runner.benchmark_loader, "load_all_benchmarks"
+    ), mock.patch.object(
+        runner.registry.benchmark_registry,
+        "get_benchmark",
+        side_effect=self._fake_get_benchmark,
+    ):
+      with self.assertRaises(ValueError):
+        runner.run_benchmarks(
+            tasks=[("all_reduce", params)],
+            output_dir=self.temp_dir.name,
+            standalone_host_init=True,
+        )
+    self.assertEqual(calls, ["xla"])
+
+  def test_requires_ici_defaults_to_true_on_base_benchmark(self):
+    """Fail-closed: a benchmark that does not opt out is treated as needing ICI."""
+
+    class _Unmarked(base.BaseBenchmark):
+
+      def run_op(self, *args, **kwargs):
+        return None
+
+    class _OptedOut(base.BaseBenchmark):
+      requires_ici = False
+
+      def run_op(self, *args, **kwargs):
+        return None
+
+    self.assertTrue(base.BaseBenchmark.requires_ici)
+    self.assertTrue(_Unmarked.requires_ici)
+    self.assertFalse(_OptedOut.requires_ici)
+
   def test_run_benchmarks(self):
     """Verifies that run_benchmarks executes typed benchmark tasks."""
     dummy_params = base.BaseBenchmarkParams(warmup_tries=1, num_runs=1)
@@ -216,6 +366,8 @@ class TestRunner(absltest.TestCase):
         local_devices=4,
         process_count=1,
         process_index=0,
+        slice_count=1,
+        slice_index=0,
         python_version="3.11.0",
         jax_version="0.4.30",
         jaxlib_version="0.4.30",
@@ -249,7 +401,9 @@ class TestRunner(absltest.TestCase):
                   mock_bench_instance.run.return_value = base.BenchmarkResult(
                       metadata=mock_metadata,
                       metrics={"avg_ms": 1.0},
-                      raw_times_ms=[1.0],
+                      timings=base.BenchmarkTimings(
+                          wall_clock=base.WallClockTimings(durations_ms=[1.0])
+                      ),
                   )
                   mock_bench_instance.get_run_identifier.return_value = "run_1"
                   mock_bench_cls = mock.MagicMock(
@@ -273,6 +427,9 @@ class TestRunner(absltest.TestCase):
                   mock_set_xla.assert_called_once_with(
                       [{"name": "dummy"}], xla_flags_file_path=None
                   )
+                  mock_get_benchmark.assert_called_once_with(
+                      "dummy", generation="tpu7x"
+                  )
                   mock_init_jax.assert_called_once()
                   mock_bench_instance.run.assert_called_once()
 
@@ -288,6 +445,8 @@ class TestRunner(absltest.TestCase):
         local_devices=8,
         process_count=1,
         process_index=0,
+        slice_count=1,
+        slice_index=0,
         python_version="3.11.0",
         jax_version="0.4.30",
         jaxlib_version="0.4.30",
@@ -316,7 +475,9 @@ class TestRunner(absltest.TestCase):
                 mock_bench_instance.run.return_value = base.BenchmarkResult(
                     metadata=mock_metadata,
                     metrics={"avg_ms": 1.0},
-                    raw_times_ms=[1.0],
+                    timings=base.BenchmarkTimings(
+                        wall_clock=base.WallClockTimings(durations_ms=[1.0])
+                    ),
                 )
                 mock_bench_instance.get_run_identifier.return_value = "run_1"
                 mock_bench_cls = mock.MagicMock(
@@ -351,6 +512,8 @@ class TestRunner(absltest.TestCase):
         local_devices=4,
         process_count=1,
         process_index=0,
+        slice_count=1,
+        slice_index=0,
         python_version="3.11.0",
         jax_version="0.4.30",
         jaxlib_version="0.4.30",
@@ -379,7 +542,9 @@ class TestRunner(absltest.TestCase):
                 mock_bench_instance.run.return_value = base.BenchmarkResult(
                     metadata=mock_metadata,
                     metrics={"avg_ms": 1.0},
-                    raw_times_ms=[1.0],
+                    timings=base.BenchmarkTimings(
+                        wall_clock=base.WallClockTimings(durations_ms=[1.0])
+                    ),
                 )
                 mock_bench_cls = mock.MagicMock(return_value=mock_bench_instance)
                 mock_get_benchmark.return_value = mock_bench_cls
@@ -402,6 +567,8 @@ class TestRunner(absltest.TestCase):
         local_devices=4,
         process_count=1,
         process_index=0,
+        slice_count=1,
+        slice_index=0,
         python_version="3.11.0",
         jax_version="0.4.30",
         jaxlib_version="0.4.30",
@@ -440,6 +607,8 @@ class TestRunner(absltest.TestCase):
         local_devices=4,
         process_count=1,
         process_index=0,
+        slice_count=1,
+        slice_index=0,
         python_version="3.11.0",
         jax_version="0.4.30",
         jaxlib_version="0.4.30",
@@ -471,7 +640,9 @@ class TestRunner(absltest.TestCase):
                   mock_result = base.BenchmarkResult(
                       metadata=mock_metadata,
                       metrics={"avg_ms": 1.0},
-                      raw_times_ms=[1.0],
+                      timings=base.BenchmarkTimings(
+                          wall_clock=base.WallClockTimings(durations_ms=[1.0])
+                      ),
                   )
                   mock_bench_instance.run.return_value = mock_result
                   mock_bench_instance.get_run_identifier.return_value = "run_1"
@@ -506,6 +677,88 @@ class TestRunner(absltest.TestCase):
                       output_dir=tmpdir,
                       print_table=False,
                   )
+
+  def test_run_benchmarks_applies_param_defaults(self):
+    """Verifies run_benchmarks applies registered generation param_defaults without clobbering explicit values."""
+    default_params = base.BaseBenchmarkParams()
+    explicit_params = base.BaseBenchmarkParams(warmup_tries=7, num_runs=9)
+    explicit_default_val_params = base.BaseBenchmarkParams(
+        warmup_tries=0, num_runs=10
+    )
+    mock_platform = platform.PlatformInfo(
+        tpu_type=system.TpuVersion.TPU7X,
+        topology="2x2x1",
+        total_devices=4,
+        local_devices=4,
+        process_count=1,
+        process_index=0,
+        slice_count=1,
+        slice_index=0,
+        python_version="3.11.0",
+        jax_version="0.4.30",
+        jaxlib_version="0.4.30",
+        libtpu_version="0.1.dev20240101",
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+      with mock.patch.object(runner, "set_xla_flags"):
+        with mock.patch.object(runner, "init_jax_distributed"):
+          with mock.patch.object(
+              runner.platform, "get_platform_info", return_value=mock_platform
+          ):
+            with mock.patch.object(runner, "export_to_mlcompass"):
+              with mock.patch.object(
+                  runner.registry.benchmark_registry, "get_benchmark"
+              ) as mock_get_benchmark:
+                with mock.patch.object(
+                    runner.registry.benchmark_registry,
+                    "get_param_defaults",
+                    return_value={"warmup_tries": 5, "num_runs": 12},
+                ):
+                  mock_bench_instance = mock.MagicMock()
+                  mock_metadata = base.BenchmarkMetadata(
+                      benchmark_name="dummy",
+                      test_name="dummy_test",
+                      start_time="now",
+                      end_time="then",
+                      params={},
+                      platform_info=mock_platform,
+                      hardware_spec=system.TPU7X_HARDWARE_SPEC,
+                  )
+                  mock_bench_instance.run.return_value = base.BenchmarkResult(
+                      metadata=mock_metadata,
+                      metrics={"avg_ms": 1.0},
+                      timings=base.BenchmarkTimings(
+                          wall_clock=base.WallClockTimings(durations_ms=[1.0])
+                      ),
+                  )
+                  mock_bench_instance.get_run_identifier.return_value = "run_1"
+                  mock_bench_cls = mock.MagicMock(
+                      return_value=mock_bench_instance,
+                      __name__="MockBenchmark",
+                  )
+                  mock_get_benchmark.return_value = mock_bench_cls
+
+                  runner.run_benchmarks(
+                      tasks=[
+                          ("dummy", default_params),
+                          ("dummy", explicit_params),
+                          ("dummy", explicit_default_val_params),
+                      ],
+                      output_dir=tmpdir,
+                      print_table=False,
+                  )
+                  self.assertEqual(mock_bench_cls.call_count, 3)
+                  first_cfg = mock_bench_cls.call_args_list[0].kwargs["config"]
+                  second_cfg = mock_bench_cls.call_args_list[1].kwargs["config"]
+                  third_cfg = mock_bench_cls.call_args_list[2].kwargs["config"]
+                  self.assertEqual(first_cfg.warmup_tries, 5)
+                  self.assertEqual(first_cfg.num_runs, 12)
+                  self.assertEqual(second_cfg.warmup_tries, 7)
+                  self.assertEqual(second_cfg.num_runs, 9)
+                  # Explicitly passed 0 and 10 (even though 10 == field default)
+                  # are preserved over generation defaults.
+                  self.assertEqual(third_cfg.warmup_tries, 0)
+                  self.assertEqual(third_cfg.num_runs, 10)
 
 
 if __name__ == "__main__":

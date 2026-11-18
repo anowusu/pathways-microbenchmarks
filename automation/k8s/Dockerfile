@@ -1,4 +1,4 @@
-# Driver image of the TPUMS nightly runtime comparison (automation/nightly_runner.py).
+# Driver image of the TPUMS nightly runtime comparison (automation/suite_runner.py).
 # It submits the JobSets, polls them, aggregates summary.csv files, publishes
 # the GCS report and writes BigQuery rows; the benchmarks themselves run in the
 # TPU workload image, not here.
@@ -35,4 +35,4 @@ RUN mkdir -p /opt/tpums \
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 ENV PYTHONPATH=/app PYTHONUNBUFFERED=1 USE_GKE_GCLOUD_AUTH_PLUGIN=True
-ENTRYPOINT ["python", "-m", "automation.nightly_runner"]
+ENTRYPOINT ["python", "-m", "automation.suite_runner"]

@@ -61,7 +61,8 @@ class PathwaysTest(absltest.TestCase):
         loaded["traceEvents"],
         [{**process, "args": {"name": "/device:TPU:0"}}] + trace["traceEvents"][1:],
     )
-    self.assertEqual(profiler._get_target_pid(loaded, local_device_id=0), 1)  # pylint: disable=protected-access
+    process_pids = profiler._get_process_pids(loaded["traceEvents"])  # pylint: disable=protected-access
+    self.assertEqual(profiler._get_target_pid(process_pids, local_device_id=0), 1)  # pylint: disable=protected-access
 
   def test_load_trace_without_worker_trace(self):
     with mock.patch.dict(sys.modules, _fake_tensorflow([], {})):

@@ -1,0 +1,12 @@
+# All-reduce between slices over the data center network (DCN). The automation
+# runs `dcn_*` benchmarks on 2 slices of this directory's topology (4x8).
+benchmark:
+  name: dcn_all_reduce
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 5
+    dtype: bfloat16
+    reduce_op: sum
+  sweep:
+    matrix_dim: [131072, 262144, 524288]

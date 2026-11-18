@@ -15,8 +15,14 @@ import importlib.metadata
 import platform as py_platform
 from typing import Sequence
 
+from accelerator_microbenchmarks.core import pathways
 from accelerator_microbenchmarks.core import system
 import jax
+
+# TPU chips attached to one host of a multi-host slice on GKE (v5e, v6e and
+# tpu7x). Used only where JAX cannot tell: a Pathways client addresses every
+# device of the job and its devices carry no host identity.
+_CHIPS_PER_MULTI_HOST_SLICE_HOST = 4
 
 
 @dataclasses.dataclass(frozen=True)
@@ -139,6 +145,29 @@ def _get_slice_count(devices: Sequence[jax.Device]) -> int:
   return len({get_device_slice_index(d) for d in devices})
 
 
+def get_devices_per_host(devices_per_chip: int) -> int:
+  """Returns the number of JAX devices attached to one TPU host.
+
+  With McJAX this is the process's local device count. A Pathways client is
+  one process that addresses every device of the job, so the count is derived
+  instead: a host of a multi-host slice has 4 chips on GKE, and a slice with
+  fewer chips is a single host.
+
+  Args:
+    devices_per_chip: JAX devices per chip (`HardwareSpec.devices_per_chip`).
+  """
+  if not pathways.is_active():
+    return jax.local_device_count()
+  devices = jax.devices()
+  first_slice = get_device_slice_index(devices[0])
+  slice_devices = sum(
+      1 for d in devices if get_device_slice_index(d) == first_slice
+  )
+  return min(
+      _CHIPS_PER_MULTI_HOST_SLICE_HOST * max(devices_per_chip, 1), slice_devices
+  )
+
+
 def _get_local_slice_index(local_devices: Sequence[jax.Device]) -> int:
   """Returns the slice index shared by this process's local devices.
 
@@ -146,13 +175,17 @@ def _get_local_slice_index(local_devices: Sequence[jax.Device]) -> int:
     local_devices: The devices attached to this process (`jax.local_devices()`).
 
   Returns:
-    The integer slice index of this process.
+    The integer slice index of this process; 0 for a Pathways client, which
+    belongs to no slice and addresses the devices of all of them.
 
   Raises:
-    RuntimeError: If `local_devices` is empty or spans more than one slice.
+    RuntimeError: If `local_devices` is empty or, without Pathways, spans more
+      than one slice.
   """
   if not local_devices:
     raise RuntimeError("No local TPU devices found for current process.")
+  if pathways.is_active():
+    return 0
   local_slice_indices = {get_device_slice_index(d) for d in local_devices}
   if len(local_slice_indices) > 1:
     raise RuntimeError(

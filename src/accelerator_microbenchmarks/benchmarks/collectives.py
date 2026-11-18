@@ -554,6 +554,12 @@ class DcnCollectiveBenchmark(
 
   Config = DcnCollectivesParams
   derive_chip_bandwidth: bool = False
+  # XLA lowers a cross-slice collective to `send`/`recv`/`send-done`/
+  # `recv-done` ops that do not carry the JAX name stack, so no trace event has
+  # the MARKER scope (checked on TPU v5e, 2 slices of 4x8, with McJAX and
+  # Pathways). The jitted function holds nothing but the collective, so its
+  # XLA module execution on a device is the on-device time of one step.
+  xprof_module_span_fallback: bool = True
   REPORT_SCHEMA: Sequence[tuple[str, Callable[[Any], str]]] = (
       ("dtype", report.format_str),
       ("matrix_dim", report.format_str),
@@ -595,11 +601,6 @@ class DcnCollectiveBenchmark(
   def _get_sharding_axes(self):
     return "dcn"
 
-  def _op_scope(self) -> contextlib.AbstractContextManager[Any]:
-    # TODO(simonleesyuan): Check on hardware whether the MARKER scope is safe on
-    # DCN collectives; if so, drop this override so xprof timing works on DCN.
-    return contextlib.nullcontext()
-
   def _get_replica_group_rank(self) -> int:
     """Returns the number of slices in one replica group."""
     return len(self._get_first_replica_group_devices())
@@ -632,7 +633,10 @@ class DcnCollectiveBenchmark(
     per_device_gbps = self.get_total_bytes() * 8.0 / (latency_s * 1e9)
     return {
         f"{prefix}_bandwidth_per_host_gbps": (
-            per_device_gbps * jax.local_device_count()
+            per_device_gbps
+            * platform.get_devices_per_host(
+                self.hardware_spec.devices_per_chip
+            )
         ),
     }
 
@@ -649,8 +653,7 @@ class AllReduceOpMixin(
   from `_get_sharding_axes()` and scales the per-device transfer size to its
   reporting scope in `get_total_bytes()`.
 
-  `_setup_jit_fn()` wraps the op in the MARKER named scope and `zero_crop`
-  directly instead of using `_op_scope()`, since `zero_crop` is ICI-only, so
+  `_setup_jit_fn()` wraps the op in `zero_crop`, which is ICI-only, so
   `DcnAllReduceBenchmark` overrides `_setup_jit_fn()`; the rest of this mixin
   is reusable as is.
   """
@@ -765,7 +768,8 @@ class DcnAllReduceBenchmark(
     @jax.jit
     def all_reduce_sharded(x):
       def f(a):
-        return op_fn(a, axis_name=sharding_axes)
+        with self._op_scope():
+          return op_fn(a, axis_name=sharding_axes)
 
       return jax.shard_map(
           f,

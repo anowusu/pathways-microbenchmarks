@@ -1,10 +1,12 @@
 """Unit tests for core/platform.py."""
 
+import os
 from unittest import mock
 
 from absl.testing import absltest
 from accelerator_microbenchmarks.core import platform
 from accelerator_microbenchmarks.core import system
+import jax
 
 
 class PlatformTest(absltest.TestCase):
@@ -193,6 +195,42 @@ class PlatformTest(absltest.TestCase):
     dev_1.slice_index = 1
     with self.assertRaisesRegex(RuntimeError, "span multiple slices"):
       platform._get_local_slice_index([dev_0, dev_1])
+
+  def test_get_local_slice_index_pathways_client_is_slice_zero(self):
+    """A Pathways client addresses the devices of every slice."""
+    dev_0 = mock.MagicMock()
+    dev_0.slice_index = 0
+    dev_1 = mock.MagicMock()
+    dev_1.slice_index = 1
+    with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy"}):
+      self.assertEqual(platform._get_local_slice_index([dev_0, dev_1]), 0)  # pylint: disable=protected-access
+
+  def test_get_devices_per_host(self):
+    """McJAX: local devices. Pathways: 4 chips per host, capped by the slice."""
+
+    def devices(per_slice, num_slices=2):
+      devs = []
+      for slice_index in range(num_slices):
+        for _ in range(per_slice):
+          dev = mock.MagicMock()
+          dev.slice_index = slice_index
+          devs.append(dev)
+      return devs
+
+    with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "tpu"}):
+      with mock.patch.object(jax, "local_device_count", return_value=8):
+        self.assertEqual(platform.get_devices_per_host(2), 8)
+
+    with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy"}):
+      # The client sees every device as local; the answer must not be 64.
+      with mock.patch.object(jax, "local_device_count", return_value=64):
+        with mock.patch.object(jax, "devices", return_value=devices(32)):
+          self.assertEqual(platform.get_devices_per_host(1), 4)  # v5e 4x8
+        with mock.patch.object(jax, "devices", return_value=devices(128)):
+          self.assertEqual(platform.get_devices_per_host(2), 8)  # tpu7x 4x4x4
+        # A single-host slice with fewer than 4 chips.
+        with mock.patch.object(jax, "devices", return_value=devices(2)):
+          self.assertEqual(platform.get_devices_per_host(1), 2)
 
   def test_get_platform_info_distributed_init_failure_ignored(self):
     """Verify get_platform_info proceeds if distributed.initialize fails."""

@@ -1413,7 +1413,11 @@ class CollectivesBenchmarkTest(parameterized.TestCase):
       _setup_on_dcn_mesh(dcn_bm, num_slices=5)
 
   def test_all_to_all_op_scope_by_topology(self):
-    """Verify ICI all-to-all lowers inside MARKER and DCN all-to-all does not."""
+    """Verify ICI and DCN all-to-all both lower inside the MARKER scope.
+
+    On DCN the scope is harmless but XLA drops it when it lowers the
+    cross-slice ops, so DCN benchmarks also enable the module-span fallback.
+    """
     ici_bm = collectives.AllToAllBenchmark(
         config=collectives.IciCollectivesParams(matrix_dim=64, dtype="float32"),
         hardware_spec=system.TPU7X_HARDWARE_SPEC,
@@ -1432,10 +1436,26 @@ class CollectivesBenchmarkTest(parameterized.TestCase):
     )
     _setup_on_dcn_mesh(dcn_bm, num_slices=2)
     (dcn_x,) = dcn_bm.generate_inputs()
-    self.assertNotIn(
+    self.assertIn(
         constants.MARKER,
         dcn_bm._jit_fn.lower(dcn_x).as_text(debug_info=True),  # pylint: disable=protected-access
     )
+    self.assertFalse(ici_bm.xprof_module_span_fallback)
+    self.assertTrue(dcn_bm.xprof_module_span_fallback)
+
+  def test_dcn_all_reduce_lowers_inside_marker_scope(self):
+    """Verify DCN all-reduce is scoped and times steps by module execution."""
+    dcn_bm = collectives.DcnAllReduceBenchmark(
+        config=collectives.DcnAllReduceParams(matrix_dim=64, dtype="float32"),
+        hardware_spec=system.TPU7X_HARDWARE_SPEC,
+    )
+    _setup_on_dcn_mesh(dcn_bm, num_slices=2)
+    (dcn_x,) = dcn_bm.generate_inputs()
+    self.assertIn(
+        constants.MARKER,
+        dcn_bm._jit_fn.lower(dcn_x).as_text(debug_info=True),  # pylint: disable=protected-access
+    )
+    self.assertTrue(dcn_bm.xprof_module_span_fallback)
 
   def test_all_gather_schema_coverage(self):
     """Verify AllGatherBenchmark REPORT_SCHEMA matches output keys."""

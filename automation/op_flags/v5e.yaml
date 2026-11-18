@@ -1,0 +1,23 @@
+# op_flags.yaml entries that differ on v5e.
+#
+# The automation runs a benchmark listed here with this file instead of
+# src/accelerator_microbenchmarks/op_flags.yaml, so each entry is complete: it
+# repeats every upstream flag and changes only the ones explained below
+# (tests/test_op_flag_overrides.py checks that).
+
+# op_flags.yaml sizes the megascale gRPC premap of dcn_all_reduce for tpu7x and
+# v6e hosts: 128 GiB. A v5e host (ct5lp-hightpu-4t) has 188 GiB of memory and
+# the benchmark process then holds 137 GiB of it, so the kubelet evicts the pod
+# as soon as anything else on the node needs memory. 64 GiB is the premap
+# dcn_all_to_all runs with.
+dcn_all_reduce:
+  flags:
+    - "--xla_tpu_use_enhanced_launch_barrier=false"
+    - "--xla_tpu_prefer_async_allgather_to_allreduce=true"
+    - "--xla_tpu_data_parallel_opt_different_sized_ops=true"
+    - "--xla_tpu_enable_data_parallel_all_reduce_opt=true"
+    - "--megascale_max_reduction_shard_size=16777216"
+    - "--xla_tpu_use_megascale_host_reduction=false"
+    - "--megascale_grpc_premap_memory_bytes=68719476736"
+  env:
+    GLIBC_TUNABLES: "glibc.pthread.rseq=0"

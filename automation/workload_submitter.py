@@ -590,6 +590,7 @@ def generate_pathways_manifest(
       ),
       pod_priority_class=pod_priority_class,
       num_slices=num_slices,
+      op_flags_file=utils.op_flags_override_path(acc, config_rel_path) or None,
   )
   return yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
 
@@ -619,12 +620,16 @@ def generate_jobset_manifest(
   `num_slices` is the number of slices of `topology` the JobSet gets: one
   `slice-job` replica each. With more than one (DCN benchmarks), the container
   also gets the GLIBC_TUNABLES value multi-slice benchmarks need.
+
+  A benchmark with an entry in `op_flags/<accelerator>.yaml` runs with that
+  file (`--xla_flags_file_path`) instead of op_flags.yaml.
   """
+  acc = utils.infer_accelerator(
+      accelerator, config_path=config_rel_path, topology=topology
+  )
   if topo_info is None:
-    acc = utils.infer_accelerator(
-        accelerator, config_path=config_rel_path, topology=topology
-    )
     topo_info = utils.compute_topology_info(topology, accelerator=acc)
+  op_flags_file = utils.op_flags_override_path(acc, config_rel_path)
   num_nodes = topo_info["num_nodes"]
   placement_policy = topo_info["placement_policy"]
 
@@ -655,6 +660,9 @@ def generate_jobset_manifest(
       "${PARALLELISM}": str(num_nodes),
       "${COMPLETIONS}": str(num_nodes),
       "${CONFIG_PATH}": config_rel_path,
+      "${XLA_FLAGS_FILE_ARG}": (
+          f"--xla_flags_file_path={op_flags_file}" if op_flags_file else ""
+      ),
       "${GIT_REPO}": git_repo,
       "${GIT_BRANCH}": git_branch,
       "${GCS_OUTPUT_DIR}": gcs_output_dir,

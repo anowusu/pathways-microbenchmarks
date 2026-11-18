@@ -182,6 +182,23 @@ class WorkloadSubmitterTest(parameterized.TestCase):
     self.assertEqual(job_spec["parallelism"], 1)
     env = {e["name"]: e for e in pod_spec["containers"][0]["env"]}
     self.assertEqual(env["GLIBC_TUNABLES"]["value"], "glibc.pthread.rseq=0")
+    # tpu7x runs with op_flags.yaml as it is.
+    self.assertNotIn("--xla_flags_file_path", pod_spec["containers"][0]["args"][0])
+
+  def test_generate_jobset_manifest_accelerator_op_flags(self):
+    """A benchmark in op_flags/<accelerator>.yaml runs with that file."""
+    _, _, pod_spec = _render_manifest(
+        "4x8", "configs/v5e/4x8/dcn_all_reduce.yaml", num_slices=2
+    )
+    self.assertIn(
+        'tpums benchmark run-config "configs/v5e/4x8/dcn_all_reduce.yaml"'
+        " --xla_flags_file_path=automation/op_flags/v5e.yaml \\\n",
+        pod_spec["containers"][0]["args"][0],
+    )
+    _, _, pod_spec = _render_manifest("4x8", "configs/v5e/4x8/all_reduce.yaml")
+    script = pod_spec["containers"][0]["args"][0]
+    self.assertNotIn("--xla_flags_file_path", script)
+    self.assertNotIn("XLA_FLAGS_FILE_ARG", script)
 
   @parameterized.named_parameters(
       ("tpu7x_single_host", "2x2x1", "tpu7x", 1, "tpu7x", None),

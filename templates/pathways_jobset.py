@@ -85,18 +85,28 @@ def _parse_args() -> argparse.Namespace:
   )
   add("--repo", default=_REPO_URL, help="TPUMS repository to run.")
   add("--ref", default="main", help="Branch or tag of --repo to run.")
+  add(
+      "--op_flags_file",
+      default="",
+      help="Op flags file to use instead of op_flags.yaml, relative to the repo.",
+  )
   add("--apply", action="store_true", help="Create the JobSet, not just YAML.")
   return parser.parse_args()
 
 
-def benchmark_op_flags(config_path: str) -> tuple[list[str], dict[str, str]]:
+def benchmark_op_flags(
+    config_path: str, op_flags_file: Optional[str] = None
+) -> tuple[list[str], dict[str, str]]:
   """Returns the op_flags.yaml flags and env of the benchmark in `config_path`.
 
   Args:
     config_path: TPUMS config, relative to the repository root.
+    op_flags_file: Op flags file to read instead of op_flags.yaml, relative to
+      the repository root (what `--xla_flags_file_path` is to the CLI).
   """
   config = yaml.safe_load((_REPO_ROOT / config_path).read_text())
-  op_flags = yaml.safe_load(_OP_FLAGS.read_text())
+  op_flags_path = _REPO_ROOT / op_flags_file if op_flags_file else _OP_FLAGS
+  op_flags = yaml.safe_load(op_flags_path.read_text())
   op_flags = op_flags.get(config["benchmark"]["name"]) or {}
   flags = [str(flag) for flag in op_flags.get("flags") or []]
   env = {key: str(value) for key, value in (op_flags.get("env") or {}).items()}
@@ -136,6 +146,7 @@ def build_pathways_jobset(
     extra_labels: Optional[dict[str, str]] = None,
     extra_env: Optional[dict[str, str]] = None,
     pod_priority_class: str = "",
+    op_flags_file: Optional[str] = None,
 ) -> jobset.PathwaysJobSet:
   """Builds the Pathways JobSet that runs one TPUMS config.
 
@@ -165,15 +176,21 @@ def build_pathways_jobset(
     pod_priority_class: Pod PriorityClass of the head and worker pods, or ""
       for none. On shared Kueue clusters without WorkloadPriorityClasses this
       is what sets the workload priority (and so who preempts whom).
+    op_flags_file: Op flags file to use instead of op_flags.yaml, relative to
+      the repository root.
 
   Returns:
     The JobSet, ready for `export_yaml()` or `apply()`.
   """
-  flags, env = benchmark_op_flags(config)
+  flags, env = benchmark_op_flags(config, op_flags_file)
   # McJAX applies op_flags.yaml to the benchmark process through
   # LIBTPU_INIT_ARGS. On Pathways the proxy compiles and the workers execute,
   # so both take the flags on their command line (the open-source binaries
-  # forward --xla_* and --megascale_* flags to libtpu).
+  # forward --xla_* and --megascale_* flags to libtpu). The resource manager
+  # takes them as well: it derives the slice topology it expects from its own
+  # flags, and rejects workers whose topology differs ("The newly added slice
+  # topology is not expected by the resource manager"). dcn_all_reduce's
+  # --xla_tpu_use_enhanced_launch_barrier=false is such a flag.
   worker_kwargs: dict[str, Any] = {}
   if flags:
     worker_kwargs["args"] = flags
@@ -200,6 +217,7 @@ def build_pathways_jobset(
       labels=labels or None,
       head_pod_spec_kwargs=pod_spec_kwargs,
       worker_pod_spec_kwargs=pod_spec_kwargs,
+      rm_container_kwargs={"args": flags} if flags else None,
       proxy_container_kwargs={"args": flags} if flags else None,
       worker_container_kwargs=worker_kwargs or None,
   )
@@ -235,6 +253,7 @@ def build_jobset(args: argparse.Namespace) -> jobset.PathwaysJobSet:
       repo=args.repo,
       ref=args.ref,
       pod_priority_class=args.pod_priority_class,
+      op_flags_file=args.op_flags_file or None,
   )
 
 

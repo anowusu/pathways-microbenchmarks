@@ -76,6 +76,11 @@ DEFAULT_DCN_NUM_SLICES = int(os.environ.get("TPUMS_DCN_NUM_SLICES", "2"))
 # at process start, so it has to be in the container environment.
 DCN_GLIBC_TUNABLES = "glibc.pthread.rseq=0"
 
+# op_flags.yaml is tuned for tpu7x and v6e hosts. `op_flags/<accelerator>.yaml`
+# holds the entries that have to differ on another accelerator; a benchmark
+# listed there runs with that file instead (see `op_flags_override_path`).
+OP_FLAGS_OVERRIDE_DIR = AUTOMATION_DIR / "op_flags"
+
 
 @dataclasses.dataclass(frozen=True)
 class AcceleratorDefaultConfig:
@@ -427,6 +432,34 @@ def config_num_slices(config_path: str) -> int:
   if config_benchmark_name(config_path).startswith(DCN_BENCHMARK_PREFIX):
     return DEFAULT_DCN_NUM_SLICES
   return 1
+
+
+def op_flags_override_path(accelerator: Optional[str], config_path: str) -> str:
+  """Returns the op flags file a config runs with instead of op_flags.yaml.
+
+  `op_flags/<accelerator>.yaml` lists the benchmarks whose flags differ on that
+  accelerator. McJAX gets the file through `--xla_flags_file_path`, and the
+  Pathways JobSet takes its container flags from it, so every runtime runs
+  with the same flags.
+
+  Args:
+    accelerator: Accelerator family (`v5e`, `v6e`, `tpu7x`), or None.
+    config_path: Config path, absolute or relative to the package root.
+
+  Returns:
+    The file's path relative to the package root, or "" if the accelerator has
+    no entry for the config's benchmark.
+  """
+  if not accelerator:
+    return ""
+  path = OP_FLAGS_OVERRIDE_DIR / f"{accelerator}.yaml"
+  if not path.is_file():
+    return ""
+  with open(path, "r", encoding="utf-8") as f:
+    overrides = yaml.safe_load(f) or {}
+  if config_benchmark_name(config_path) not in overrides:
+    return ""
+  return str(path.relative_to(PACKAGE_ROOT))
 
 
 def normalize_topologies(

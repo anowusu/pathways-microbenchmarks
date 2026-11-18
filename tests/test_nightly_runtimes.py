@@ -183,13 +183,44 @@ class WorkloadNamingTest(parameterized.TestCase):
     worker_container = worker["template"]["spec"]["template"]["spec"]["containers"][0]
     env = {e["name"]: e.get("value") for e in worker_container["env"]}
     self.assertEqual(env["GLIBC_TUNABLES"], "glibc.pthread.rseq=0")
-    # The megascale flags of op_flags.yaml reach the workers and the proxy.
+    # The op flags reach the workers, the proxy and the resource manager: the
+    # resource manager rejects workers whose topology flags differ from its own
+    # (--xla_tpu_use_enhanced_launch_barrier is one).
     proxy = next(c for c in head_spec["initContainers"] if c["name"] == "pathways-proxy")
-    for container in (worker_container, proxy):
-      self.assertTrue(
-          [a for a in container["args"] if a.startswith("--megascale_")],
+    for container in (worker_container, proxy, rm):
+      self.assertIn(
+          "--xla_tpu_use_enhanced_launch_barrier=false",
+          container["args"],
           container["name"],
       )
+      # v5e hosts cannot hold op_flags.yaml's 128 GiB premap: op_flags/v5e.yaml.
+      self.assertIn(
+          "--megascale_grpc_premap_memory_bytes=68719476736",
+          container["args"],
+          container["name"],
+      )
+    # The resource manager keeps its own arguments.
+    self.assertIn("--instance_type=tpuv5e:4x8", rm["args"])
+
+  @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
+  def test_pathways_manifest_keeps_upstream_op_flags_elsewhere(self):
+    manifest = workload_submitter.generate_pathways_manifest(
+        workload_name="tpums-louhi-dcn-ar",
+        namespace="default",
+        queue_name="multislice-queue",
+        priority_class="",
+        topology="2x2x1",
+        docker_image="img:latest",
+        config_rel_path="configs/tpu7x/2x2x1/dcn_all_reduce.yaml",
+        gcs_output_dir="gs://b/2026-11-18/louhi/dcn_all_reduce",
+        runtime=runtimes.LOUHI,
+        num_slices=2,
+    )
+    head, worker = yaml.safe_load(manifest)["spec"]["replicatedJobs"]
+    worker_container = worker["template"]["spec"]["template"]["spec"]["containers"][0]
+    self.assertIn(
+        "--megascale_grpc_premap_memory_bytes=137438953472", worker_container["args"]
+    )
 
   def test_mcjax_names_keep_topology_and_runtime(self):
     self.assertEqual(

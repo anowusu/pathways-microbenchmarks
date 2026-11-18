@@ -29,6 +29,7 @@
 #   export EXCLUSIVE_TOPOLOGY="kubernetes.io/hostname"  # or "cloud.google.com/gke-nodepool" for multi-host
 #   export NUM_SLICES="1"       # 2 or more for multi-slice (DCN) benchmarks
 #   export GLIBC_TUNABLES=""    # "glibc.pthread.rseq=0" for multi-slice benchmarks
+#   export XLA_FLAGS_FILE_ARG="" # "--xla_flags_file_path=automation/op_flags/v5e.yaml" for dcn_all_reduce on v5e
 #   export PARALLELISM="1"
 #   export COMPLETIONS="1"
 #   export CHIPS_PER_NODE="4"
@@ -170,7 +171,7 @@ spec:
                       echo "=== Executing Benchmark: ${CONFIG_PATH} ==="
                       rm -rf /tmp/tensorboard
 
-                      tpums benchmark run-config "${CONFIG_PATH}" \
+                      tpums benchmark run-config "${CONFIG_PATH}" ${XLA_FLAGS_FILE_ARG} \
                         --output_dir=/tmp/results \
                         --xprof_dir=/tmp/tensorboard 2>&1 | tee /tmp/execution.log
 

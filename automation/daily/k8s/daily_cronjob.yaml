@@ -76,7 +76,10 @@ spec:
           serviceAccountName: default
           restartPolicy: Never
           nodeSelector:
-            cloud.google.com/gke-nodepool: default-pool
+            # Kueue admits this Job through LocalQueue `default` (cluster-queue).
+            # Its CPU flavor `cpu-np` selects this node pool; with `default-pool`
+            # no flavor matches and the Job stays suspended.
+            cloud.google.com/gke-nodepool: cpu-np
           containers:
             - name: driver
               image: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-pathways-metrics-daily:latest

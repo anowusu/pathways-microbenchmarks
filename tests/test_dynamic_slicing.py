@@ -13,8 +13,10 @@
 # limitations under the License.
 """Tests for JobSets on dynamic slicing clusters and the tpu7x scale configs."""
 
+import json
 import math
 import pathlib
+import subprocess
 from unittest import mock
 
 from absl.testing import absltest
@@ -332,6 +334,42 @@ class ImagePinsTest(absltest.TestCase):
         _pod(pinned, "slice-job")["spec"]["containers"][0]["image"], f"img@{self._A}"
     )
     self.assertEqual(pinned["metadata"]["generateName"], "tpums-test-")
+
+
+class PodQueryTest(absltest.TestCase):
+
+  def _run(self, pods):
+    def run(cmd, **kwargs):
+      del kwargs  # Unused.
+      self.commands.append(cmd)
+      return subprocess.CompletedProcess(
+          args=cmd, returncode=0, stdout=json.dumps({"items": pods}), stderr=""
+      )
+
+    self.commands = []
+    return mock.patch("subprocess.run", side_effect=run)
+
+  def test_only_the_pods_of_the_named_jobsets_are_listed(self):
+    pod = {"metadata": {"name": "p", "labels": {"jobset.sigs.k8s.io/jobset-name": "mb-a"}}}
+    with self._run([pod]):
+      grouped = workload_submitter.fetch_namespace_pods("priority-dev", ["mb-b", "mb-a"])
+    self.assertEqual(grouped, {"mb-a": [pod]})
+    (cmd,) = self.commands
+    self.assertEqual(
+        cmd[cmd.index("-l") + 1], "jobset.sigs.k8s.io/jobset-name in (mb-a,mb-b)"
+    )
+
+  def test_no_jobsets_no_query(self):
+    with self._run([]):
+      self.assertEqual(workload_submitter.fetch_namespace_pods("priority-dev", []), {})
+    self.assertEmpty(self.commands)
+
+  def test_whole_namespace_without_names_or_with_too_many(self):
+    with self._run([]):
+      workload_submitter.fetch_namespace_pods("default")
+      workload_submitter.fetch_namespace_pods("default", [f"js-{i}" for i in range(41)])
+    for cmd in self.commands:
+      self.assertNotIn("-l", cmd)
 
 
 class NamesAndRetriesTest(absltest.TestCase):

@@ -28,14 +28,21 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Collection, Mapping, Optional
 
 from automation import dynamic_slicing
 from automation import runtimes as runtimes_lib
 from automation import utils
 import yaml
 
-DEFAULT_TICK_INTERVAL_SECONDS = 15
+# Seconds between two status queries of the cluster. Large runs (hundreds of
+# pods per JobSet) raise it with TPUMS_TICK_INTERVAL_SECONDS.
+DEFAULT_TICK_INTERVAL_SECONDS = int(
+    os.environ.get("TPUMS_TICK_INTERVAL_SECONDS", "15")
+)
+# Above this many JobSets, a label selector naming each one gets unwieldy and
+# the pods of the whole namespace are listed instead.
+_MAX_JOBSETS_IN_POD_SELECTOR = 40
 DEFAULT_CLEANUP = False
 # Consecutive failed cluster status queries tolerated by `poll()` before it
 # gives up (~75s at the default tick interval).
@@ -616,6 +623,8 @@ def generate_pathways_manifest(
   return yaml.safe_dump(manifest, sort_keys=False)
 
 
+# Label JobSet puts on the pods of a JobSet.
+_JOBSET_NAME_LABEL = "jobset.sigs.k8s.io/jobset-name"
 # Container flag that sets a Pathways binary's debugging overrides.
 _DEBUG_OVERRIDE_FLAG = "--temporary_flags_for_debugging="
 # Replicated jobs whose pods run on TPU hosts: McJAX (jobset_template.yaml)
@@ -1014,12 +1023,15 @@ def upload_provenance(gcs_output_dir: str, provenance: dict[str, Any]) -> None:
     )
 
 
-def _kubectl_get_items(resource: str, namespace: str) -> list[dict[str, Any]]:
+def _kubectl_get_items(
+    resource: str, namespace: str, selector: str = ""
+) -> list[dict[str, Any]]:
   """Returns the items of `kubectl get <resource> -n <namespace> -o json`.
 
   Args:
     resource: Kubernetes resource type (e.g. 'jobsets', 'pods').
     namespace: Namespace to query.
+    selector: Label selector that narrows the query ("" = everything).
 
   Returns:
     The `items` list of the returned Kubernetes List object.
@@ -1029,6 +1041,8 @@ def _kubectl_get_items(resource: str, namespace: str) -> list[dict[str, Any]]:
     RuntimeError: If kubectl times out, exits non-zero or prints invalid JSON.
   """
   cmd = ["kubectl", "get", resource, "-n", namespace, "-o", "json"]
+  if selector:
+    cmd += ["-l", selector]
   try:
     res = subprocess.run(
         cmd,
@@ -1071,11 +1085,16 @@ def fetch_namespace_jobsets(namespace: str) -> dict[str, dict[str, Any]]:
   }
 
 
-def fetch_namespace_pods(namespace: str) -> dict[str, list[dict[str, Any]]]:
-  """Fetches all Pods in the target namespace grouped by workload name.
+def fetch_namespace_pods(
+    namespace: str, jobset_names: Optional[Collection[str]] = None
+) -> dict[str, list[dict[str, Any]]]:
+  """Fetches the Pods of JobSets in the target namespace, grouped by JobSet.
 
   Args:
     namespace: Namespace to query.
+    jobset_names: JobSets whose pods to fetch; None fetches the pods of the
+      whole namespace. On a shared cluster the namespace holds thousands of
+      other users' pods, which a poll every few seconds must not list.
 
   Returns:
     Pod objects grouped by their `jobset.sigs.k8s.io/jobset-name` label.
@@ -1084,10 +1103,18 @@ def fetch_namespace_pods(namespace: str) -> dict[str, list[dict[str, Any]]]:
     FileNotFoundError: If kubectl is not on PATH.
     RuntimeError: If kubectl exits non-zero or prints invalid JSON.
   """
+  selector = ""
+  if jobset_names is not None:
+    if not jobset_names:
+      return {}
+    if len(jobset_names) <= _MAX_JOBSETS_IN_POD_SELECTOR:
+      selector = (
+          f"{_JOBSET_NAME_LABEL} in ({','.join(sorted(jobset_names))})"
+      )
   grouped: dict[str, list[dict[str, Any]]] = {}
-  for pod in _kubectl_get_items("pods", namespace):
+  for pod in _kubectl_get_items("pods", namespace, selector):
     labels = pod.get("metadata", {}).get("labels", {})
-    wl = labels.get("jobset.sigs.k8s.io/jobset-name")
+    wl = labels.get(_JOBSET_NAME_LABEL)
     if wl:
       grouped.setdefault(wl, []).append(pod)
   return grouped
@@ -1857,7 +1884,9 @@ class WorkloadManager:
     while time.time() < deadline:
       try:
         jobsets_data = fetch_namespace_jobsets(self.namespace)
-        pods_data = fetch_namespace_pods(self.namespace)
+        pods_data = fetch_namespace_pods(
+            self.namespace, list(self.active_workloads)
+        )
       except RuntimeError as e:
         # Tolerate transient API-server errors; a missing kubectl
         # (FileNotFoundError) propagates immediately.

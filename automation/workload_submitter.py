@@ -28,7 +28,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from automation import dynamic_slicing
 from automation import runtimes as runtimes_lib
@@ -539,6 +539,7 @@ def generate_pathways_manifest(
     pod_priority_class: str = "",
     num_slices: int = 1,
     cluster_profile: Optional[str] = None,
+    image_pins: Optional[Mapping[str, str]] = None,
 ) -> str:
   """Generates the Pathways JobSet manifest of one config on a Pathways runtime.
 
@@ -566,6 +567,8 @@ def generate_pathways_manifest(
       for DCN benchmarks).
     cluster_profile: How the JobSet is shaped for the cluster (default:
       TPUMS_CLUSTER_PROFILE); see `utils.CLUSTER_PROFILES`.
+    image_pins: Images to pin by digest (default: TPUMS_IMAGE_PINS); see
+      `parse_image_pins`.
 
   Returns:
     The JobSet manifest YAML.
@@ -609,6 +612,7 @@ def generate_pathways_manifest(
         tpu_jobs=(_PATHWAYS_WORKER_JOB,),
         pathways=True,
     )
+  pin_images(manifest, DEFAULT_IMAGE_PINS if image_pins is None else image_pins)
   return yaml.safe_dump(manifest, sort_keys=False)
 
 
@@ -618,6 +622,58 @@ _DEBUG_OVERRIDE_FLAG = "--temporary_flags_for_debugging="
 # and Pathways (pathwaysutils).
 _MCJAX_SLICE_JOB = "slice-job"
 _PATHWAYS_WORKER_JOB = "pathways-worker"
+
+
+# Container images pinned by digest: comma-separated
+# `<image>:<tag>=sha256:<digest>` entries in TPUMS_IMAGE_PINS. Runs that have
+# to use the same images (a smoke test and the scale run it prepares) pin them
+# instead of trusting a tag that can move in between.
+_IMAGE_PIN_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def parse_image_pins(value: Optional[str]) -> dict[str, str]:
+  """Parses TPUMS_IMAGE_PINS into `{<image>:<tag>: sha256:<digest>}`.
+
+  Args:
+    value: Comma-separated `<image>:<tag>=sha256:<digest>` entries, or None.
+
+  Raises:
+    ValueError: If an entry is malformed.
+  """
+  pins: dict[str, str] = {}
+  for entry in utils.split_csv_tokens([value]) if value else []:
+    ref, _, digest = entry.partition("=")
+    if not ref or not _IMAGE_PIN_RE.fullmatch(digest):
+      raise ValueError(
+          f"Image pin {entry!r} is not `<image>:<tag>=sha256:<64 hex digits>`."
+      )
+    pins[ref] = digest
+  return pins
+
+
+DEFAULT_IMAGE_PINS = parse_image_pins(os.environ.get("TPUMS_IMAGE_PINS"))
+
+
+def pin_images(manifest: dict[str, Any], pins: Mapping[str, str]) -> list[str]:
+  """Rewrites the container images listed in `pins` to `<image>@<digest>`.
+
+  Args:
+    manifest: A JobSet manifest; modified in place.
+    pins: `{<image>:<tag>: sha256:<digest>}`, as from `parse_image_pins`.
+
+  Returns:
+    The image references that were pinned, each once, in manifest order.
+  """
+  pinned: list[str] = []
+  for job in (manifest.get("spec") or {}).get("replicatedJobs") or []:
+    spec = job["template"]["spec"]["template"]["spec"]
+    for container in (spec.get("initContainers") or []) + (spec.get("containers") or []):
+      image = container.get("image")
+      if image in pins:
+        container["image"] = f"{image.rsplit(':', 1)[0]}@{pins[image]}"
+        if image not in pinned:
+          pinned.append(image)
+  return pinned
 
 
 class _BlockDumper(yaml.SafeDumper):
@@ -679,6 +735,7 @@ def generate_jobset_manifest(
     pod_priority_class: str = "",
     num_slices: int = 1,
     cluster_profile: Optional[str] = None,
+    image_pins: Optional[Mapping[str, str]] = None,
 ) -> str:
   """Generates a native GKE JobSet manifest using automation/jobset_template.yaml.
 
@@ -783,14 +840,19 @@ def generate_jobset_manifest(
         manifest,
     )
 
-  if utils.uses_dynamic_slicing(cluster_profile):
+  dynamic = utils.uses_dynamic_slicing(cluster_profile)
+  pins = DEFAULT_IMAGE_PINS if image_pins is None else image_pins
+  # The template is text; it is only parsed when something has to change.
+  if dynamic or any(f"image: {ref}" in manifest for ref in pins):
     doc = yaml.safe_load(manifest)
-    dynamic_slicing.apply(
-        doc, topology=topology, tpu_jobs=(_MCJAX_SLICE_JOB,), pathways=False
-    )
-    # A fixed, short name: the caller picks one per attempt.
-    doc["metadata"].pop("generateName", None)
-    doc["metadata"] = {"name": workload_name, **doc["metadata"]}
+    if dynamic:
+      dynamic_slicing.apply(
+          doc, topology=topology, tpu_jobs=(_MCJAX_SLICE_JOB,), pathways=False
+      )
+      # A fixed, short name: the caller picks one per attempt.
+      doc["metadata"].pop("generateName", None)
+      doc["metadata"] = {"name": workload_name, **doc["metadata"]}
+    pin_images(doc, pins)
     manifest = yaml.dump(doc, Dumper=_BlockDumper, sort_keys=False, width=1000)
 
   return manifest

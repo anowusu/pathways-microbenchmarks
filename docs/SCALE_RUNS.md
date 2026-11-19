@@ -74,6 +74,18 @@ packages in `/opt/tpums/PIP_FREEZE.txt`.
 1.  Point `KUBECONFIG` at a kubeconfig file whose current context is the
     cluster. The driver uses the current context.
 
+1.  Optional: To run with the same Pathways images as an earlier run, pin
+    the images by digest. The driver replaces each image reference in the
+    list with the image at that digest:
+
+    ```bash
+    export TPUMS_IMAGE_PINS="IMAGE:TAG=sha256:DIGEST,IMAGE:TAG=sha256:DIGEST"
+    ```
+
+    Replace `IMAGE:TAG` with an image reference as the JobSets use it, such
+    as the server image of a runtime in `automation/runtimes.py`, and
+    `DIGEST` with the digest to run.
+
 1.  Run the driver:
 
     ```bash

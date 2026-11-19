@@ -262,6 +262,78 @@ class PathwaysManifestTest(absltest.TestCase):
     self.assertIn("git clone --depth 1", script)
 
 
+class ImagePinsTest(absltest.TestCase):
+
+  _SERVER = "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"
+  _PROXY = "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest"
+  _A = "sha256:" + "a" * 64
+  _B = "sha256:" + "b" * 64
+
+  def test_parse(self):
+    self.assertEqual(workload_submitter.parse_image_pins(None), {})
+    self.assertEqual(
+        workload_submitter.parse_image_pins(f"{self._SERVER}={self._A}, {self._PROXY}={self._B}"),
+        {self._SERVER: self._A, self._PROXY: self._B},
+    )
+    for bad in (self._SERVER, f"{self._SERVER}=latest", f"={self._A}", f"{self._SERVER}=sha256:abc"):
+      with self.assertRaisesRegex(ValueError, "Image pin"):
+        workload_submitter.parse_image_pins(bad)
+
+  @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
+  def test_pathways_images_are_pinned_everywhere_they_run(self):
+    manifest = yaml.safe_load(
+        workload_submitter.generate_pathways_manifest(
+            workload_name="mb-louhi-x",
+            namespace="priority-dev",
+            queue_name="multislice-queue",
+            priority_class="medium",
+            topology="4x4x8",
+            docker_image="img:tag",
+            config_rel_path="configs/tpu7x/4x4x8/gemm.yaml",
+            gcs_output_dir="gs://b/x",
+            runtime=runtimes.LOUHI,
+            cluster_profile=_DYNAMIC,
+            image_pins={self._SERVER: self._A, self._PROXY: self._B},
+        )
+    )
+    head = _pod(manifest, "pathways-head")["spec"]
+    images = {c["name"]: c["image"] for c in head["initContainers"] + head["containers"]}
+    worker = _pod(manifest, "pathways-worker")["spec"]["containers"][0]["image"]
+    server = f"{self._SERVER.rsplit(':', 1)[0]}@{self._A}"
+    self.assertEqual(images["pathways-rm"], server)
+    self.assertEqual(worker, server)
+    self.assertEqual(
+        images["pathways-proxy"], f"{self._PROXY.rsplit(':', 1)[0]}@{self._B}"
+    )
+    # Images without a pin keep their reference.
+    self.assertEqual(images["user-workload"], "img:tag")
+
+  def test_mcjax_template_stays_text_without_a_matching_pin(self):
+    kwargs = dict(
+        workload_name="tpums-test",
+        namespace="default",
+        queue_name="multislice-queue",
+        priority_class="medium",
+        topology="4x4x4",
+        docker_image="img:tag",
+        config_rel_path="configs/tpu7x/4x4x4/all_gather.yaml",
+        gcs_output_dir="gs://b/x",
+        cluster_profile=utils.CLUSTER_PROFILE_STANDARD,
+    )
+    plain = workload_submitter.generate_jobset_manifest(**kwargs, image_pins={})
+    other = workload_submitter.generate_jobset_manifest(
+        **kwargs, image_pins={self._SERVER: self._A}
+    )
+    self.assertEqual(plain, other)
+    pinned = yaml.safe_load(
+        workload_submitter.generate_jobset_manifest(**kwargs, image_pins={"img:tag": self._A})
+    )
+    self.assertEqual(
+        _pod(pinned, "slice-job")["spec"]["containers"][0]["image"], f"img@{self._A}"
+    )
+    self.assertEqual(pinned["metadata"]["generateName"], "tpums-test-")
+
+
 class NamesAndRetriesTest(absltest.TestCase):
 
   def test_short_names_fit_twenty_characters(self):

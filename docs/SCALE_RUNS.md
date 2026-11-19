@@ -31,7 +31,7 @@ JobSets of both runtimes (`automation/dynamic_slicing.py`):
 
 | Part of the JobSet | Standard cluster | Dynamic slicing cluster |
 |---|---|---|
-| Slice selection | `cloud.google.com/gke-tpu-topology` node selector | `cloud.google.com/gke-tpu-slice-topology` annotation on the JobSet, the TPU job, and the pods, plus the Kueue pod-set annotations. The pods keep the `cloud.google.com/gke-tpu-topology` node selector, because the cluster rejects TPU pods without the selector. |
+| Slice selection | `cloud.google.com/gke-tpu-topology` node selector | `cloud.google.com/gke-tpu-slice-topology` annotation on the JobSet, the TPU job, and the pods, plus the Kueue pod-set annotations. The pods don't have the `cloud.google.com/gke-tpu-topology` node selector, because the cluster adds the selector when it admits the JobSet. |
 | Cubes | Not applicable | Only cubes whose state is `HEALTHY` |
 | Network | McJAX pods use the host network | Every pod uses the host network, the Pathways head included |
 | McJAX JobSet name | Generated: `tpums-<topology>-mcjax-<config>-<suffix>` | Fixed: `<prefix>-mcjax-<config>` |
@@ -42,6 +42,19 @@ JobSets of both runtimes (`automation/dynamic_slicing.py`):
 A pod on the host network has the identity of its node. On the
 shared-capacity clusters, that identity can write the results bucket. A pod on
 the pod network runs as the workload identity pool of the cluster, which can't.
+
+### The warning event before a JobSet is admitted
+
+While a JobSet waits for admission, it has a `JobCreationFailed` warning
+event: the admission policy of the cluster
+(`tpu-accelerator-topology-constraints`) rejects the TPU job because the pods
+don't select `cloud.google.com/gke-tpu-topology`. This event doesn't mean
+that the JobSet failed. When Kueue admits the JobSet, the dynamic slicing
+admission check adds the selector, and JobSet creates the job.
+
+Don't add the selector to the manifest to avoid the event. No free node has
+the topology label before the slice exists, so Kueue finds no nodes for the
+pods and never admits the JobSet.
 
 ## Build the workload image
 

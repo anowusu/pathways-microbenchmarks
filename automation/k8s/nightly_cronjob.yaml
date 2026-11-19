@@ -1,5 +1,6 @@
-# TPUMS nightly runtime comparison: McJAX vs Pathways (Louhi, Rapid) on
-# TPU v5e 4x8, driven from inside the cluster by a CronJob.
+# TPUMS hourly runtime comparison: McJAX vs Pathways (Louhi, Rapid) on
+# TPU v5e 4x8 (DCN benchmarks: two 4x8 slices), driven from inside the cluster
+# by a CronJob. The Pathways images run unmodified.
 #
 #   kubectl apply -f automation/k8s/nightly_cronjob.yaml
 #   kubectl create job --from=cronjob/tpums-nightly tpums-nightly-manual   # run now
@@ -61,8 +62,9 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
-      # 15 JobSets, at most 3 in flight, 25 min each, one retry: under 5 h.
-      activeDeadlineSeconds: 18000
+      # 21 JobSets, at most 3 in flight, 25 min each, one retry: under 6 h
+      # in the worst case (a run takes about 20 minutes).
+      activeDeadlineSeconds: 21600
       template:
         metadata:
           labels:
@@ -70,6 +72,11 @@ spec:
         spec:
           serviceAccountName: tpums-nightly
           restartPolicy: Never
+          # Same pod PriorityClass as the benchmark JobSets. Kueue manages this
+          # Job too (LocalQueue `default`); without a priority class the driver
+          # runs at priority 0 and is preempted, which kills the whole run, for
+          # any other workload that needs cpu-np quota.
+          priorityClassName: medium
           nodeSelector:
             # Kueue admits this Job through LocalQueue `default` (cluster-queue).
             # Its CPU flavor `cpu-np` selects this node pool; with `default-pool`
@@ -79,15 +86,6 @@ spec:
             - name: driver
               image: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/tpums-nightly:latest
               imagePullPolicy: Always
-              env:
-                # Dynamically patch the live OSS Louhi server image
-                # (us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest)
-                # on the fly at the start of every CronJob run by injecting the
-                # PJRT TPU profiler registration layer (libpjrt_profiler_patch.so).
-                - name: TPUMS_PATCH_OSS_IMAGE
-                  value: "1"
-                - name: TPUMS_PATCHED_SERVER_IMAGE
-                  value: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu/server
               args:
                 - --cluster=pw-scale-test-v5e-32
                 - --project=cloud-tpu-multipod-dev
@@ -105,8 +103,9 @@ spec:
                 # by every other job on this shared cluster.
                 - --pod-priority-class=medium
                 - --suite-file=automation/canonical_suite_v5e.yaml
+                # The stock Louhi image writes device traces, so it runs as it
+                # is (no --patch-oss-image).
                 - --runtimes=mcjax,louhi,rapid
-                - --patch-oss-image
                 - --max-parallel=3
                 - --timeout-minutes=25
                 # A preempted or hung JobSet is deleted and resubmitted once.

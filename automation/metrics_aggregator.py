@@ -37,6 +37,13 @@ from automation import utils
 def verify_gcs_bucket_accessible(gcs_bucket: str) -> None:
   """Fails fast if the GCS bucket is missing or not readable by this identity.
 
+  Lists the prefix, then each parent of it, and at last the bucket itself; the
+  first listing that succeeds is the proof. A prefix that has no objects yet
+  (the first run under a new prefix) makes `ls` fail with "matched no objects",
+  so a failure only counts when the bucket itself cannot be listed. The bucket
+  comes last because listing the top level of a large shared bucket takes
+  minutes, and a prefix of this run or of its neighbours takes a second.
+
   Args:
     gcs_bucket: Bucket name or gs:// prefix to probe.
 
@@ -44,22 +51,30 @@ def verify_gcs_bucket_accessible(gcs_bucket: str) -> None:
     RuntimeError: If the bucket cannot be listed.
   """
   bucket_uri = utils.format_gcs_uri(gcs_bucket)
-  # Probe the bucket itself: a prefix that has no objects yet (first night
-  # under a new prefix) makes `ls` fail with "matched no objects".
-  bucket_only = "gs://" + bucket_uri.removeprefix("gs://").split("/", 1)[0]
-  proc = subprocess.run(
-      ["gcloud", "storage", "ls", bucket_only],
-      capture_output=True,
-      text=True,
-      check=False,
-      stdin=subprocess.DEVNULL,
-      timeout=utils.CLI_TIMEOUT_SECONDS,
-  )
-  if proc.returncode != 0:
-    raise RuntimeError(
-        f"GCS bucket {bucket_uri} is not accessible (exit"
-        f" {proc.returncode}): {proc.stderr.strip()}"
+  parts = [p for p in bucket_uri.removeprefix("gs://").split("/") if p]
+  proc = None
+  for depth in range(len(parts), 0, -1):
+    probe = "gs://" + "/".join(parts[:depth])
+    if depth > 1:
+      # With the slash, `ls` lists the children of the prefix; without it,
+      # it would also match objects whose names merely start with it.
+      probe += "/"
+    proc = subprocess.run(
+        ["gcloud", "storage", "ls", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        timeout=utils.CLI_TIMEOUT_SECONDS,
     )
+    if proc.returncode == 0:
+      return
+  if proc is None:
+    raise RuntimeError(f"GCS bucket {gcs_bucket!r} has no bucket name")
+  raise RuntimeError(
+      f"GCS bucket {bucket_uri} is not accessible (exit"
+      f" {proc.returncode}): {proc.stderr.strip()}"
+  )
 
 
 # Runtime discriminator columns added to every row (see runtimes.py); the

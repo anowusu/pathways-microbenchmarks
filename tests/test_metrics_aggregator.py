@@ -419,6 +419,47 @@ class MetricsAggregatorTest(parameterized.TestCase):
     self.assertEqual(discovered[0]["workload_name"], "tpums-4x4-all-gather")
     self.assertIn("scratch-dir", "\n".join(logs.output))
 
+  def _probe_bucket(self, listable):
+    """Runs the bucket check with `ls` succeeding only for `listable` URLs."""
+    probed = []
+
+    def fake_run(cmd, **unused_kwargs):
+      probed.append(cmd[3])
+      ok = cmd[3] in listable
+      return subprocess.CompletedProcess(
+          cmd,
+          0 if ok else 1,
+          stdout="gs://b/x\n" if ok else "",
+          stderr="" if ok else "ERROR: One or more URLs matched no objects.",
+      )
+
+    with mock.patch.object(subprocess, "run", side_effect=fake_run):
+      metrics_aggregator.verify_gcs_bucket_accessible("gs://b/scale/run-1")
+    return probed
+
+  def test_bucket_check_stops_at_the_first_listable_prefix(self):
+    """An existing prefix proves access without listing the bucket's top level."""
+    self.assertEqual(self._probe_bucket({"gs://b/scale/run-1/"}), ["gs://b/scale/run-1/"])
+
+  def test_bucket_check_walks_up_from_a_new_prefix(self):
+    """The first run under a new prefix is answered by a parent that exists."""
+    self.assertEqual(
+        self._probe_bucket({"gs://b/scale/"}), ["gs://b/scale/run-1/", "gs://b/scale/"]
+    )
+    # A new top-level prefix still falls back to the bucket itself.
+    self.assertEqual(
+        self._probe_bucket({"gs://b"}), ["gs://b/scale/run-1/", "gs://b/scale/", "gs://b"]
+    )
+
+  def test_bucket_check_fails_only_when_the_bucket_cannot_be_listed(self):
+    denied = subprocess.CompletedProcess(
+        args=["gcloud", "storage", "ls"], returncode=1, stdout="", stderr="403 Forbidden"
+    )
+    with mock.patch.object(subprocess, "run", return_value=denied) as run:
+      with self.assertRaisesRegex(RuntimeError, "not accessible.*403 Forbidden"):
+        metrics_aggregator.verify_gcs_bucket_accessible("gs://b/scale")
+    self.assertEqual([c.args[0][3] for c in run.call_args_list], ["gs://b/scale/", "gs://b"])
+
   def test_discover_logs_gcloud_ls_failure(self):
     """Non-zero gcloud storage ls exit logs exit code and stderr."""
     failed = subprocess.CompletedProcess(

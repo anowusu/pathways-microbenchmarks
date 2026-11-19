@@ -1,0 +1,30 @@
+# TPUMS workload image: a client image with this checkout and its dependencies
+# installed.
+#
+# The JobSet templates clone the repository and install it when a pod starts.
+# Hundreds of hosts cannot all do that at the same moment, so large runs use
+# this image instead: the templates see TPUMS_HOME and skip both steps.
+#
+# The environment is built the way the McJAX template builds it at start (uv,
+# a fresh venv, `uv pip install`), so a run from this image and a run that
+# installs at start have the same packages. PIP_FREEZE.txt lists them.
+#
+#   gcloud builds submit --project <project> \
+#     --config automation/k8s/cloudbuild_workload.yaml \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD),_COMMIT=$(git rev-parse HEAD) .
+ARG BASE_IMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+FROM ${BASE_IMAGE}
+ARG TPUMS_COMMIT=unknown
+COPY . /opt/tpums
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && export PATH="/root/.local/bin:${PATH}" \
+    && uv venv /opt/tpums-venv \
+    && . /opt/tpums-venv/bin/activate \
+    && uv pip install '/opt/tpums[pathways]' \
+    && uv pip freeze > /opt/tpums/PIP_FREEZE.txt \
+    && echo "${TPUMS_COMMIT}" > /opt/tpums/GIT_COMMIT \
+    && tpums --help > /dev/null
+ENV TPUMS_HOME=/opt/tpums \
+    VIRTUAL_ENV=/opt/tpums-venv \
+    PATH=/opt/tpums-venv/bin:${PATH}
+WORKDIR /opt/tpums

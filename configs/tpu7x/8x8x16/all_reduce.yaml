@@ -1,0 +1,22 @@
+# all_reduce within one tpu7x 8x8x16 slice: 1024 chips on 256 hosts,
+# 2048 JAX devices (2 per chip), logical mesh 128x8x2.
+#
+# `128x8x1` runs the collective over one device of every chip, `128x8x2`
+# over every device.
+#
+# Device time is the time of JAX device 0 (the default aggregation), not
+# upstream's `global_slowest_per_step` of the smaller tpu7x configs: device 0
+# is the one device that McJAX and Pathways can both time (see
+# docs/NIGHTLY_RUNTIMES.md, "Which device the device time comes from").
+benchmark:
+  name: all_reduce
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 10
+    dtype: bfloat16
+    reduce_op: sum
+    mesh_shape: 128x8x2
+  sweep:
+    sharding_strategy: ["128x8x1", "128x8x2"]
+    matrix_dim: [65536, 131072, 262144]

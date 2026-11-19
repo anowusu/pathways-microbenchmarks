@@ -66,6 +66,29 @@ PACKAGE_ROOT = AUTOMATION_DIR.parent
 _CONFIGS_ROOT = PACKAGE_ROOT / "configs"
 DEFAULT_TEMPLATE_PATH = str(AUTOMATION_DIR / "jobset_template.yaml")
 
+# How JobSets are shaped for the target cluster (TPUMS_CLUSTER_PROFILE):
+#   standard:        a node pool is one slice of a fixed topology.
+#   dynamic-slicing: Kueue composes each slice out of 4x4x4 cubes (the TPU7x
+#                    shared-capacity clusters); see dynamic_slicing.py.
+CLUSTER_PROFILE_STANDARD = "standard"
+CLUSTER_PROFILE_DYNAMIC_SLICING = "dynamic-slicing"
+CLUSTER_PROFILES = (CLUSTER_PROFILE_STANDARD, CLUSTER_PROFILE_DYNAMIC_SLICING)
+DEFAULT_CLUSTER_PROFILE = os.environ.get(
+    "TPUMS_CLUSTER_PROFILE", CLUSTER_PROFILE_STANDARD
+)
+if DEFAULT_CLUSTER_PROFILE not in CLUSTER_PROFILES:
+  raise ValueError(
+      f"TPUMS_CLUSTER_PROFILE is {DEFAULT_CLUSTER_PROFILE!r}; choose from"
+      f" {list(CLUSTER_PROFILES)}."
+  )
+
+
+def uses_dynamic_slicing(cluster_profile: Optional[str] = None) -> bool:
+  """Whether `cluster_profile` (default: TPUMS_CLUSTER_PROFILE) slices dynamically."""
+  return (cluster_profile or DEFAULT_CLUSTER_PROFILE) == (
+      CLUSTER_PROFILE_DYNAMIC_SLICING
+  )
+
 # Benchmarks registered as `dcn_*` run a collective between slices over the
 # data center network, so their JobSets need more than one slice; every other
 # benchmark runs within a single slice.
@@ -128,6 +151,9 @@ ACCELERATOR_CONFIGS: dict[str, AcceleratorDefaultConfig] = {
             "2x4x4",
             "4x4x4",
             "4x4x8",
+            "4x8x8",
+            "8x8x8",
+            "8x8x16",
         ),
         suite_filename="canonical_suite_v7x.yaml",
     ),

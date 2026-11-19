@@ -1,0 +1,15 @@
+# HBM copy on a tpu7x 4x4x8 slice (256 JAX devices); the sweep is
+# that of configs/tpu7x/2x2x1/hbm.yaml.
+benchmark:
+  name: hbm
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 10
+    dtype: bfloat16
+    op_type: copy
+  sweep:
+    num_elements:
+      start: 67108864
+      end: 536870912
+      multiplier: 2

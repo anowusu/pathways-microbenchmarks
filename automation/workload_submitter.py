@@ -30,6 +30,7 @@ import sys
 import time
 from typing import Any, Optional
 
+from automation import dynamic_slicing
 from automation import runtimes as runtimes_lib
 from automation import utils
 import yaml
@@ -194,7 +195,8 @@ class ActiveWorkload:
   provenance: dict[str, Any] = dataclasses.field(default_factory=dict)
   # Pathways JobSets carry a fixed `metadata.name` (pathwaysutils derives
   # nothing from it, but their names must stay short); McJAX JobSets use
-  # `generateName`.
+  # `generateName`, except on dynamic slicing clusters, where every JobSet
+  # has a fixed, short name.
   fixed_name: bool = False
   # Name the workload was prepared under (McJAX JobSets get a generated
   # suffix on creation); retries are queued under it again.
@@ -483,20 +485,24 @@ def runtime_workload_name(
     config_name: str,
     topology: str,
     prefix: str = DEFAULT_WORKLOAD_PREFIX,
+    short: bool = False,
 ) -> str:
   """Returns the JobSet name of `config_name` on `runtime`.
 
   McJAX names follow `sanitize_workload_name` (`<prefix>-<topology>-<runtime>-
   <config>`, completed by `generateName`). Pathways names are
   `<prefix>-<runtime>-<config>` truncated to `PATHWAYS_WORKLOAD_NAME_MAX_LEN`.
+  With `short`, McJAX names take the Pathways form: the shared-capacity
+  clusters limit JobSet names to 20 characters.
 
   Args:
     runtime: The runtime.
     config_name: Config file stem, e.g. `all_gather`.
     topology: Slice topology, e.g. `4x8`.
     prefix: First component of the name.
+    short: Whether McJAX names take the short, fixed form too.
   """
-  if not runtime.is_pathways:
+  if not runtime.is_pathways and not short:
     return sanitize_workload_name(
         f"{runtime.name}-{config_name}", topology, prefix=prefix
     )
@@ -532,6 +538,7 @@ def generate_pathways_manifest(
     accelerator: Optional[str] = None,
     pod_priority_class: str = "",
     num_slices: int = 1,
+    cluster_profile: Optional[str] = None,
 ) -> str:
   """Generates the Pathways JobSet manifest of one config on a Pathways runtime.
 
@@ -557,6 +564,8 @@ def generate_pathways_manifest(
     pod_priority_class: Pod PriorityClass of head and worker pods ("" = none).
     num_slices: Number of slices of `topology` the JobSet gets (more than one
       for DCN benchmarks).
+    cluster_profile: How the JobSet is shaped for the cluster (default:
+      TPUMS_CLUSTER_PROFILE); see `utils.CLUSTER_PROFILES`.
 
   Returns:
     The JobSet manifest YAML.
@@ -592,11 +601,35 @@ def generate_pathways_manifest(
       num_slices=num_slices,
       op_flags_file=utils.op_flags_override_path(acc, config_rel_path) or None,
   )
-  return yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
+  manifest = pathways_jobset_obj.to_dict()
+  if utils.uses_dynamic_slicing(cluster_profile):
+    dynamic_slicing.apply(
+        manifest,
+        topology=topology,
+        tpu_jobs=(_PATHWAYS_WORKER_JOB,),
+        pathways=True,
+    )
+  return yaml.safe_dump(manifest, sort_keys=False)
 
 
 # Container flag that sets a Pathways binary's debugging overrides.
 _DEBUG_OVERRIDE_FLAG = "--temporary_flags_for_debugging="
+# Replicated jobs whose pods run on TPU hosts: McJAX (jobset_template.yaml)
+# and Pathways (pathwaysutils).
+_MCJAX_SLICE_JOB = "slice-job"
+_PATHWAYS_WORKER_JOB = "pathways-worker"
+
+
+class _BlockDumper(yaml.SafeDumper):
+  """Dumps multi-line strings (the container scripts) as literal blocks."""
+
+
+def _represent_str(dumper: yaml.SafeDumper, data: str) -> yaml.Node:
+  style = "|" if "\n" in data else None
+  return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+
+_BlockDumper.add_representer(str, _represent_str)
 
 
 def manifest_debug_overrides(manifest_yaml: str) -> str:
@@ -645,6 +678,7 @@ def generate_jobset_manifest(
     git_repo: str = utils.DEFAULT_GIT_REPO,
     pod_priority_class: str = "",
     num_slices: int = 1,
+    cluster_profile: Optional[str] = None,
 ) -> str:
   """Generates a native GKE JobSet manifest using automation/jobset_template.yaml.
 
@@ -654,6 +688,10 @@ def generate_jobset_manifest(
 
   A benchmark with an entry in `op_flags/<accelerator>.yaml` runs with that
   file (`--xla_flags_file_path`) instead of op_flags.yaml.
+
+  On a dynamic slicing cluster (`cluster_profile`, default
+  TPUMS_CLUSTER_PROFILE) the manifest is reshaped by `dynamic_slicing.apply`
+  and the JobSet is named `workload_name` itself, not a generated name.
   """
   acc = utils.infer_accelerator(
       accelerator, config_path=config_rel_path, topology=topology
@@ -744,6 +782,16 @@ def generate_jobset_manifest(
         "",
         manifest,
     )
+
+  if utils.uses_dynamic_slicing(cluster_profile):
+    doc = yaml.safe_load(manifest)
+    dynamic_slicing.apply(
+        doc, topology=topology, tpu_jobs=(_MCJAX_SLICE_JOB,), pathways=False
+    )
+    # A fixed, short name: the caller picks one per attempt.
+    doc["metadata"].pop("generateName", None)
+    doc["metadata"] = {"name": workload_name, **doc["metadata"]}
+    manifest = yaml.dump(doc, Dumper=_BlockDumper, sort_keys=False, width=1000)
 
   return manifest
 
@@ -1433,7 +1481,10 @@ class WorkloadManager:
               " submitted."
           )
         topology = infer_topology_from_config(rel_path)
-        workload_name = runtime_workload_name(runtime, config_name, topology)
+        dynamic = utils.uses_dynamic_slicing()
+        workload_name = runtime_workload_name(
+            runtime, config_name, topology, short=dynamic
+        )
         if workload_name in prepared:
           raise ValueError(
               f"Duplicate sanitized workload name {workload_name!r} for config"
@@ -1504,26 +1555,42 @@ class WorkloadManager:
                 debug_overrides
             )
         else:
-          manifest = generate_jobset_manifest(
-              workload_name=workload_name,
-              namespace=self.namespace,
-              queue_name=self.queue,
-              priority_class=self.priority,
-              topology=topology,
-              docker_image=self.docker_image,
-              config_rel_path=rel_path,
-              gcs_output_dir=gcs_output_dir,
-              declared_duration_minutes=self.declared_duration_minutes,
-              template_path=self.template_path,
-              upload_trace=self.upload_trace,
-              git_branch=self.git_branch,
-              reservation_name=self.reservation_name,
-              accelerator=acc,
-              topo_info=topo_info,
-              git_repo=self.git_repo,
-              pod_priority_class=self.pod_priority_class,
-              num_slices=num_slices,
-          )
+
+          def render_mcjax_manifest(
+              name: str,
+              *,
+              _rel: str = rel_path,
+              _topo: str = topology,
+              _gcs: str = gcs_output_dir,
+              _acc: str = acc,
+              _info: dict[str, Any] = topo_info,
+              _slices: int = num_slices,
+          ) -> str:
+            return generate_jobset_manifest(
+                workload_name=name,
+                namespace=self.namespace,
+                queue_name=self.queue,
+                priority_class=self.priority,
+                topology=_topo,
+                docker_image=self.docker_image,
+                config_rel_path=_rel,
+                gcs_output_dir=_gcs,
+                declared_duration_minutes=self.declared_duration_minutes,
+                template_path=self.template_path,
+                upload_trace=self.upload_trace,
+                git_branch=self.git_branch,
+                reservation_name=self.reservation_name,
+                accelerator=_acc,
+                topo_info=_info,
+                git_repo=self.git_repo,
+                pod_priority_class=self.pod_priority_class,
+                num_slices=_slices,
+            )
+
+          manifest = render_mcjax_manifest(workload_name)
+          if dynamic:
+            # Fixed names: a retry needs the manifest under another name.
+            render_manifest = render_mcjax_manifest
           total_pods = topo_info["num_nodes"] * num_slices
 
         if self.dry_run:
@@ -1558,7 +1625,7 @@ class WorkloadManager:
             total_pods=total_pods,
             runtime=runtime.name,
             provenance=workload_provenance,
-            fixed_name=runtime.is_pathways,
+            fixed_name=runtime.is_pathways or dynamic,
             base_name=workload_name,
             render_manifest=render_manifest,
         )

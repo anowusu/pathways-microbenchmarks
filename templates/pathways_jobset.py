@@ -53,10 +53,17 @@ _DEFAULT_DCN_NUM_SLICES = 2
 # Results (summary.csv, detailed.json, git_commit.txt, execution.log) go to
 # $GCS_RESULTS_DIR, the XProf traces the Pathways workers write to
 # $GCS_XPROF_DIR; both default to <gcs_dir>/results and <gcs_dir>/xprof.
+# A workload image (automation/k8s/Dockerfile.workload) comes with TPUMS
+# installed and says so with TPUMS_HOME; any other image clones and installs.
 _RUN = """set -o pipefail
-git clone --depth 1 --branch "$TPUMS_REF" "$TPUMS_REPO" /tmp/tpums
-cd /tmp/tpums && pip install -q -e '.[pathways]' && mkdir -p /tmp/results
-git rev-parse HEAD > /tmp/results/git_commit.txt
+mkdir -p /tmp/results
+if [ -n "${TPUMS_HOME:-}" ] && [ -f "${TPUMS_HOME:-}/GIT_COMMIT" ]; then
+  cd "$TPUMS_HOME" && cp GIT_COMMIT /tmp/results/git_commit.txt
+else
+  git clone --depth 1 --branch "$TPUMS_REF" "$TPUMS_REPO" /tmp/tpums
+  cd /tmp/tpums && pip install -q -e '.[pathways]'
+  git rev-parse HEAD > /tmp/results/git_commit.txt
+fi
 tpums benchmark run-config "$TPUMS_CONFIG" \\
     ${TPUMS_OP_FLAGS_FILE:+--xla_flags_file_path="$TPUMS_OP_FLAGS_FILE"} \\
     --output_dir=/tmp/results \\

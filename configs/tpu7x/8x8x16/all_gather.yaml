@@ -1,0 +1,26 @@
+# all_gather within one tpu7x 8x8x16 slice: 1024 chips on 256 hosts,
+# 2048 JAX devices (2 per chip), logical mesh 128x8x2.
+#
+# `128x8x1` runs the collective over one device of every chip, `128x8x2`
+# over every device.
+#
+# The per-device shard is matrix_dim x 1024 elements, and all-gather leaves
+# every device with the shards of its whole group. The sizes are smaller than
+# in the 4x4x4 config so that the result still fits a device at this scale:
+# the largest case holds 16 GiB per device.
+#
+# Device time is the time of JAX device 0 (the default aggregation), not
+# upstream's `global_slowest_per_step` of the smaller tpu7x configs: device 0
+# is the one device that McJAX and Pathways can both time (see
+# docs/NIGHTLY_RUNTIMES.md, "Which device the device time comes from").
+benchmark:
+  name: all_gather
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 10
+    dtype: bfloat16
+    mesh_shape: 128x8x2
+  sweep:
+    sharding_strategy: ["128x8x1", "128x8x2"]
+    matrix_dim: [1024, 2048, 4096]

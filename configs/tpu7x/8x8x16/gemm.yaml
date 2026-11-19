@@ -1,0 +1,26 @@
+# GEMM on every device of a tpu7x 8x8x16 slice (2048 JAX devices);
+# the cases are those of configs/tpu7x/2x2x1/gemm.yaml.
+benchmark:
+  name: gemm
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 10
+    out_dtype: bfloat16
+  cases:
+    - in_dtype: bfloat16
+      m: 8192
+      k: 8192
+      n: 8192
+    - in_dtype: bfloat16
+      m: 16384
+      k: 16384
+      n: 16384
+    - in_dtype: float8_e4m3fn
+      m: 8192
+      k: 8192
+      n: 8192
+    - in_dtype: float8_e4m3fn
+      m: 16384
+      k: 16384
+      n: 16384

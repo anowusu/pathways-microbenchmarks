@@ -1,0 +1,31 @@
+# Builds the TPUMS workload image (Dockerfile.workload) under one tag.
+#
+#   gcloud builds submit --project cloud-tpu-multipod-dev \
+#     --config automation/k8s/cloudbuild_workload.yaml \
+#     --substitutions=_TAG=$(git rev-parse --short HEAD),_COMMIT=$(git rev-parse HEAD) \
+#     --gcs-source-staging-dir gs://cloud-pathways-staging/tpums-nightly/build .
+#
+# _BASE_IMAGE pins the client image; give it by digest so that the image can be
+# rebuilt.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - automation/k8s/Dockerfile.workload
+      - --build-arg
+      - BASE_IMAGE=${_BASE_IMAGE}
+      - --build-arg
+      - TPUMS_COMMIT=${_COMMIT}
+      - -t
+      - ${_REPOSITORY}/tpums-workload:${_TAG}
+      - .
+images:
+  - ${_REPOSITORY}/tpums-workload:${_TAG}
+substitutions:
+  _REPOSITORY: us-docker.pkg.dev/cloud-tpu-multipod-dev/pathways-dev/anowusu
+  _BASE_IMAGE: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+  _COMMIT: unknown
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

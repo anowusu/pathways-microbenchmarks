@@ -1,0 +1,17 @@
+# All-reduce between slices over the data center network (DCN). The automation
+# runs `dcn_*` benchmarks on 2 slices of this directory's topology (8x8x16):
+# 2048 chips.
+#
+# Sizes and run counts are far below upstream's tpu7x 2x2x1 DCN configs
+# (up to 4M with 300 runs), which would not finish inside a capacity booking
+# at this scale. Device time is the XLA module execution on JAX device 0.
+benchmark:
+  name: dcn_all_reduce
+  xprof_timing: true
+  params:
+    warmup_tries: 2
+    num_runs: 10
+    dtype: bfloat16
+    reduce_op: sum
+  sweep:
+    matrix_dim: [131072, 262144, 524288]

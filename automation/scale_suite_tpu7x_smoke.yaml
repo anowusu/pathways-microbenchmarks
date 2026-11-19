@@ -1,0 +1,27 @@
+# Smoke test of the tpu7x scale run: the same benchmarks on 128 chips.
+#
+# Every config runs once per runtime listed under `runtimes:` (override with
+# --runtimes). Run it on a dynamic slicing cluster with
+# TPUMS_CLUSTER_PROFILE=dynamic-slicing; see docs/SCALE_RUNS.md.
+
+suite_name: scale_tpu7x_smoke
+description: McJAX vs Pathways (Louhi, Rapid) on tpu7x 4x4x8, DCN between two 4x4x4
+
+runtimes:
+  - mcjax
+  - louhi
+  - rapid
+
+configs:
+  # Collectives within one 4x4x8 slice (32 hosts, 128 chips)
+  - configs/tpu7x/4x4x8/all_gather.yaml
+  - configs/tpu7x/4x4x8/all_reduce.yaml
+  - configs/tpu7x/4x4x8/all_to_all.yaml
+
+  # Per-chip compute and memory benchmarks on the same slice
+  - configs/tpu7x/4x4x8/gemm.yaml
+  - configs/tpu7x/4x4x8/hbm.yaml
+
+  # Collectives between two 4x4x4 slices over the DCN (128 chips)
+  - configs/tpu7x/4x4x4/dcn_all_reduce.yaml
+  - configs/tpu7x/4x4x4/dcn_all_to_all.yaml

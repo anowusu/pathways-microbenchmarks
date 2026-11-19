@@ -1,0 +1,27 @@
+# tpu7x scale run: collectives on 1,024 chips, DCN collectives on 2,048.
+#
+# Every config runs once per runtime listed under `runtimes:` (override with
+# --runtimes). Run it on a dynamic slicing cluster with
+# TPUMS_CLUSTER_PROFILE=dynamic-slicing; see docs/SCALE_RUNS.md.
+
+suite_name: scale_tpu7x_8x8x16
+description: McJAX vs Pathways (Louhi, Rapid) on tpu7x 8x8x16, DCN between two slices
+
+runtimes:
+  - mcjax
+  - louhi
+  - rapid
+
+configs:
+  # Collectives within one 8x8x16 slice (256 hosts, 1,024 chips)
+  - configs/tpu7x/8x8x16/all_gather.yaml
+  - configs/tpu7x/8x8x16/all_reduce.yaml
+  - configs/tpu7x/8x8x16/all_to_all.yaml
+
+  # Per-chip compute and memory benchmarks on the same slice
+  - configs/tpu7x/8x8x16/gemm.yaml
+  - configs/tpu7x/8x8x16/hbm.yaml
+
+  # Collectives between two 8x8x16 slices over the DCN (2,048 chips)
+  - configs/tpu7x/8x8x16/dcn_all_reduce.yaml
+  - configs/tpu7x/8x8x16/dcn_all_to_all.yaml

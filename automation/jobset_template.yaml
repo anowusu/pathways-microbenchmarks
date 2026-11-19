@@ -155,18 +155,27 @@ spec:
                       echo "=== [TPUMS Workload] JAX Environment Setup ==="
                       printenv
 
-                      echo "=== Cloning accelerator-microbenchmarks repository (branch: ${GIT_BRANCH}) ==="
-                      git clone --branch "${GIT_BRANCH}" --single-branch "${GIT_REPO}" /tmp/tpums_repo
-                      cd /tmp/tpums_repo
                       mkdir -p /tmp/results
-                      git rev-parse HEAD > /tmp/results/git_commit.txt 2>/dev/null || true
+                      if [ -n "${TPUMS_HOME:-}" ] && [ -f "${TPUMS_HOME:-}/GIT_COMMIT" ]; then
+                        # A workload image (automation/k8s/Dockerfile.workload)
+                        # comes with TPUMS installed. Hundreds of hosts cannot
+                        # all clone and install at the same moment.
+                        echo "=== Using the TPUMS checkout of the image: $(cat "${TPUMS_HOME:-}/GIT_COMMIT") ==="
+                        cd "${TPUMS_HOME:-}"
+                        cp GIT_COMMIT /tmp/results/git_commit.txt
+                      else
+                        echo "=== Cloning accelerator-microbenchmarks repository (branch: ${GIT_BRANCH}) ==="
+                        git clone --branch "${GIT_BRANCH}" --single-branch "${GIT_REPO}" /tmp/tpums_repo
+                        cd /tmp/tpums_repo
+                        git rev-parse HEAD > /tmp/results/git_commit.txt 2>/dev/null || true
 
-                      echo "=== Installing dependencies ==="
-                      curl -LsSf https://astral.sh/uv/install.sh | sh
-                      export PATH="/tmp/.local/bin:$PATH"
-                      uv venv /tmp/venv
-                      source /tmp/venv/bin/activate
-                      uv pip install .
+                        echo "=== Installing dependencies ==="
+                        curl -LsSf https://astral.sh/uv/install.sh | sh
+                        export PATH="/tmp/.local/bin:$PATH"
+                        uv venv /tmp/venv
+                        source /tmp/venv/bin/activate
+                        uv pip install .
+                      fi
 
                       echo "=== Executing Benchmark: ${CONFIG_PATH} ==="
                       rm -rf /tmp/tensorboard

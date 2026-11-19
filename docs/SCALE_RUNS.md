@@ -93,6 +93,20 @@ The image records the commit in the `/opt/tpums/GIT_COMMIT` file.
     as the server image of a runtime in `automation/runtimes.py`, and
     `DIGEST` with the digest to run.
 
+1.  Optional: To add labels to every JobSet, list the labels. On the
+    shared-capacity TPU7x clusters, the following label lets a JobSet in the
+    namespace for ad hoc runs use the idle chips of capacity bookings:
+
+    ```bash
+    export TPUMS_JOBSET_LABELS="scheduling.x-k8s.io/preemptible=true"
+    ```
+
+    The cluster evicts a JobSet that has this label when a booking needs its
+    chips, with a termination grace period of 5 seconds, and starts the JobSet
+    again later. The driver counts a Pathways JobSet whose head restarted as
+    failed and submits it again. Use this label for a run that can wait, such
+    as a smoke test.
+
 1.  Run the driver:
 
     ```bash

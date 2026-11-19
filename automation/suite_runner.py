@@ -304,6 +304,14 @@ def run_pipeline(
   )
   if reservation_name:
     logging.info("Reservation Name : %s", reservation_name)
+  if workload_submitter.DEFAULT_JOBSET_LABELS:
+    logging.info(
+        "JobSet Labels    : %s",
+        ", ".join(
+            f"{k}={v}"
+            for k, v in workload_submitter.DEFAULT_JOBSET_LABELS.items()
+        ),
+    )
   logging.info("Docker Image     : %s", docker_image)
   logging.info("Runtimes         : %s", ", ".join(r.name for r in runtimes))
   logging.info("Git Repo / Branch: %s @ %s", git_repo, git_branch)

@@ -288,6 +288,85 @@ class PathwaysManifestTest(absltest.TestCase):
     self.assertNotIn("PATH=", env)
 
 
+class JobSetLabelsTest(absltest.TestCase):
+
+  _PREEMPTIBLE = {"scheduling.x-k8s.io/preemptible": "true"}
+
+  def test_parse(self):
+    self.assertEqual(workload_submitter.parse_jobset_labels(None), {})
+    self.assertEqual(
+        workload_submitter.parse_jobset_labels("scheduling.x-k8s.io/preemptible=true, team=a.b"),
+        {**self._PREEMPTIBLE, "team": "a.b"},
+    )
+    self.assertEqual(workload_submitter.parse_jobset_labels("empty="), {"empty": ""})
+    for bad in ("preemptible", "=true", "/name=true", "a b=c", "key=-x", "key=" + "v" * 64):
+      with self.assertRaisesRegex(ValueError, "JobSet label"):
+        workload_submitter.parse_jobset_labels(bad)
+
+  def test_mcjax_jobset_gets_the_labels(self):
+    for profile in (utils.CLUSTER_PROFILE_STANDARD, _DYNAMIC):
+      manifest = yaml.safe_load(
+          workload_submitter.generate_jobset_manifest(
+              workload_name="mb-mcjax-gemm",
+              namespace="priority-dev",
+              queue_name="multislice-queue",
+              priority_class="medium",
+              topology="4x4x8",
+              docker_image="img:tag",
+              config_rel_path="configs/tpu7x/4x4x8/gemm.yaml",
+              gcs_output_dir="gs://b/x",
+              cluster_profile=profile,
+              image_pins={},
+              jobset_labels=self._PREEMPTIBLE,
+          )
+      )
+      labels = manifest["metadata"]["labels"]
+      self.assertEqual(labels["scheduling.x-k8s.io/preemptible"], "true")
+      # The labels the template sets stay.
+      self.assertEqual(labels["kueue.x-k8s.io/queue-name"], "multislice-queue")
+
+  @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
+  def test_pathways_jobset_gets_the_labels(self):
+    manifest = yaml.safe_load(
+        workload_submitter.generate_pathways_manifest(
+            workload_name="mb-louhi-gemm",
+            namespace="priority-dev",
+            queue_name="multislice-queue",
+            priority_class="medium",
+            topology="4x4x8",
+            docker_image="img:tag",
+            config_rel_path="configs/tpu7x/4x4x8/gemm.yaml",
+            gcs_output_dir="gs://b/x",
+            runtime=runtimes.LOUHI,
+            cluster_profile=_DYNAMIC,
+            image_pins={},
+            jobset_labels=self._PREEMPTIBLE,
+        )
+    )
+    labels = manifest["metadata"]["labels"]
+    self.assertEqual(labels["scheduling.x-k8s.io/preemptible"], "true")
+    self.assertEqual(labels["kueue.x-k8s.io/queue-name"], "multislice-queue")
+    self.assertEqual(labels["kueue.x-k8s.io/priority-class"], "medium")
+
+  def test_no_labels_leaves_the_mcjax_template_as_text(self):
+    kwargs = dict(
+        workload_name="tpums-test",
+        namespace="default",
+        queue_name="multislice-queue",
+        priority_class="medium",
+        topology="4x4x4",
+        docker_image="img:tag",
+        config_rel_path="configs/tpu7x/4x4x4/all_gather.yaml",
+        gcs_output_dir="gs://b/x",
+        cluster_profile=utils.CLUSTER_PROFILE_STANDARD,
+        image_pins={},
+    )
+    self.assertEqual(
+        workload_submitter.generate_jobset_manifest(**kwargs, jobset_labels={}),
+        workload_submitter.generate_jobset_manifest(**kwargs),
+    )
+
+
 class ImagePinsTest(absltest.TestCase):
 
   _SERVER = "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest"

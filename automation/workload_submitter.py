@@ -547,6 +547,7 @@ def generate_pathways_manifest(
     num_slices: int = 1,
     cluster_profile: Optional[str] = None,
     image_pins: Optional[Mapping[str, str]] = None,
+    jobset_labels: Optional[Mapping[str, str]] = None,
 ) -> str:
   """Generates the Pathways JobSet manifest of one config on a Pathways runtime.
 
@@ -576,6 +577,8 @@ def generate_pathways_manifest(
       TPUMS_CLUSTER_PROFILE); see `utils.CLUSTER_PROFILES`.
     image_pins: Images to pin by digest (default: TPUMS_IMAGE_PINS); see
       `parse_image_pins`.
+    jobset_labels: Extra labels of the JobSet (default: TPUMS_JOBSET_LABELS);
+      see `parse_jobset_labels`.
 
   Returns:
     The JobSet manifest YAML.
@@ -620,6 +623,9 @@ def generate_pathways_manifest(
         pathways=True,
     )
   pin_images(manifest, DEFAULT_IMAGE_PINS if image_pins is None else image_pins)
+  label_jobset(
+      manifest, DEFAULT_JOBSET_LABELS if jobset_labels is None else jobset_labels
+  )
   return yaml.safe_dump(manifest, sort_keys=False)
 
 
@@ -685,6 +691,49 @@ def pin_images(manifest: dict[str, Any], pins: Mapping[str, str]) -> list[str]:
   return pinned
 
 
+# Extra labels of the JobSet itself: comma-separated `<key>=<value>` entries in
+# TPUMS_JOBSET_LABELS. A shared cluster reads some scheduling choices from
+# JobSet labels. On the shared-capacity TPU7x clusters, for example,
+# `scheduling.x-k8s.io/preemptible=true` lets a JobSet run on the idle chips
+# of capacity bookings, from which it is evicted when the booking needs them.
+_LABEL_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?")
+
+
+def parse_jobset_labels(value: Optional[str]) -> dict[str, str]:
+  """Parses TPUMS_JOBSET_LABELS into `{<key>: <value>}`.
+
+  Args:
+    value: Comma-separated `<key>=<value>` entries, or None.
+
+  Raises:
+    ValueError: If an entry is not a Kubernetes label.
+  """
+  labels: dict[str, str] = {}
+  for entry in utils.split_csv_tokens([value]) if value else []:
+    key, sep, label_value = entry.partition("=")
+    prefix, slash, name = key.rpartition("/")
+    if (
+        not sep
+        or not _LABEL_NAME_RE.fullmatch(name)
+        or (slash and not prefix)
+        or (label_value and not _LABEL_NAME_RE.fullmatch(label_value))
+        or max(len(name), len(label_value)) > 63
+    ):
+      raise ValueError(f"JobSet label {entry!r} is not `<key>=<value>`.")
+    labels[key] = label_value
+  return labels
+
+
+DEFAULT_JOBSET_LABELS = parse_jobset_labels(os.environ.get("TPUMS_JOBSET_LABELS"))
+
+
+def label_jobset(manifest: dict[str, Any], labels: Mapping[str, str]) -> None:
+  """Adds `labels` to the labels of the JobSet; modifies `manifest` in place."""
+  if labels:
+    metadata = manifest.setdefault("metadata", {})
+    metadata["labels"] = {**(metadata.get("labels") or {}), **labels}
+
+
 class _BlockDumper(yaml.SafeDumper):
   """Dumps multi-line strings (the container scripts) as literal blocks."""
 
@@ -745,6 +794,7 @@ def generate_jobset_manifest(
     num_slices: int = 1,
     cluster_profile: Optional[str] = None,
     image_pins: Optional[Mapping[str, str]] = None,
+    jobset_labels: Optional[Mapping[str, str]] = None,
 ) -> str:
   """Generates a native GKE JobSet manifest using automation/jobset_template.yaml.
 
@@ -758,6 +808,9 @@ def generate_jobset_manifest(
   On a dynamic slicing cluster (`cluster_profile`, default
   TPUMS_CLUSTER_PROFILE) the manifest is reshaped by `dynamic_slicing.apply`
   and the JobSet is named `workload_name` itself, not a generated name.
+
+  `jobset_labels` (default TPUMS_JOBSET_LABELS) are extra labels of the JobSet;
+  see `parse_jobset_labels`.
   """
   acc = utils.infer_accelerator(
       accelerator, config_path=config_rel_path, topology=topology
@@ -851,8 +904,9 @@ def generate_jobset_manifest(
 
   dynamic = utils.uses_dynamic_slicing(cluster_profile)
   pins = DEFAULT_IMAGE_PINS if image_pins is None else image_pins
+  labels = DEFAULT_JOBSET_LABELS if jobset_labels is None else jobset_labels
   # The template is text; it is only parsed when something has to change.
-  if dynamic or any(f"image: {ref}" in manifest for ref in pins):
+  if dynamic or labels or any(f"image: {ref}" in manifest for ref in pins):
     doc = yaml.safe_load(manifest)
     if dynamic:
       dynamic_slicing.apply(
@@ -862,6 +916,7 @@ def generate_jobset_manifest(
       doc["metadata"].pop("generateName", None)
       doc["metadata"] = {"name": workload_name, **doc["metadata"]}
     pin_images(doc, pins)
+    label_jobset(doc, labels)
     manifest = yaml.dump(doc, Dumper=_BlockDumper, sort_keys=False, width=1000)
 
   return manifest

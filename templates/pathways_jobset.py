@@ -55,6 +55,9 @@ _DEFAULT_DCN_NUM_SLICES = 2
 # $GCS_XPROF_DIR; both default to <gcs_dir>/results and <gcs_dir>/xprof.
 # A workload image (automation/k8s/Dockerfile.workload) comes with TPUMS
 # installed and says so with TPUMS_HOME; any other image clones and installs.
+# Both install into the Python of the client image, whose TensorFlow reads the
+# XProf traces of the workers (core/pathways.py): the workload image runs the
+# same `pip install` when it is built.
 _RUN = """set -o pipefail
 mkdir -p /tmp/results
 if [ -n "${TPUMS_HOME:-}" ] && [ -f "${TPUMS_HOME:-}/GIT_COMMIT" ]; then

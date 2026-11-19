@@ -44,6 +44,7 @@ _PODSET = {
     "kueue.x-k8s.io/podset-slice-size": "16",
 }
 _CONFIGS = pathlib.Path(utils.PACKAGE_ROOT) / "configs" / "tpu7x"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _mcjax(config, topology, num_slices=1, cluster_profile=_DYNAMIC, name="mb-mcjax-x"):
@@ -188,6 +189,8 @@ class McjaxManifestTest(absltest.TestCase):
       self.assertIn(
           'if [ -n "${TPUMS_HOME:-}" ] && [ -f "${TPUMS_HOME:-}/GIT_COMMIT" ]; then', script
       )
+      # The image keeps the McJAX packages in a venv of their own.
+      self.assertIn('source "${TPUMS_VENV:-/opt/tpums-venv}/bin/activate"', script)
       # Without one, the pod still clones and installs.
       self.assertIn("git clone --branch", script)
       self.assertLess(script.index("TPUMS_HOME"), script.index("git clone --branch"))
@@ -266,6 +269,23 @@ class PathwaysManifestTest(absltest.TestCase):
     script = _pod(manifest, "pathways-head")["spec"]["containers"][0]["command"][-1]
     self.assertIn('if [ -n "${TPUMS_HOME:-}" ] && [ -f "${TPUMS_HOME:-}/GIT_COMMIT" ]; then', script)
     self.assertIn("git clone --depth 1", script)
+
+  def test_workload_image_installs_the_client_the_way_the_template_does(self):
+    # The Pathways client reads worker traces with the TensorFlow of the client
+    # image. A workload image that ran the client from the McJAX venv had no
+    # device times, so the image has to install the client with the template's
+    # own command, and keep the venv off PATH.
+    script = _pod(_pathways("configs/tpu7x/4x4x8/gemm.yaml", "4x4x8"), "pathways-head")["spec"][
+        "containers"
+    ][0]["command"][-1]
+    install = "pip install -q -e '.[pathways]'"
+    self.assertIn(install, script)
+    dockerfile = (_REPO_ROOT / "automation" / "k8s" / "Dockerfile.workload").read_text()
+    self.assertIn(f"RUN {install}", dockerfile)
+    self.assertIn("_pywrap_profiler_plugin", dockerfile)
+    env = dockerfile[dockerfile.rindex("\nENV ") :]
+    self.assertIn("TPUMS_VENV=/opt/tpums-venv", env)
+    self.assertNotIn("PATH=", env)
 
 
 class ImagePinsTest(absltest.TestCase):

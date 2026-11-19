@@ -66,8 +66,15 @@ Replace the following:
     rebuilt.
 *   `STAGING_BUCKET`: a bucket for the build source.
 
-The image records the commit in `/opt/tpums/GIT_COMMIT` and the installed
-packages in `/opt/tpums/PIP_FREEZE.txt`.
+The image has one Python environment for each runtime, which is the
+environment that the runtime's template builds when a pod installs at start:
+
+| Runtime | Environment | Package list |
+| ------- | ----------- | ------------ |
+| McJAX | The `/opt/tpums-venv` virtual environment, which the template activates | `/opt/tpums/PIP_FREEZE.mcjax.txt` |
+| Pathways client | The Python of the client image, which has the TensorFlow package that reads the XProf traces of the Pathways workers | `/opt/tpums/PIP_FREEZE.pathways.txt` |
+
+The image records the commit in the `/opt/tpums/GIT_COMMIT` file.
 
 ## Run a suite
 

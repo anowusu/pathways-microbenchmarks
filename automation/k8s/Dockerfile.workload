@@ -5,9 +5,16 @@
 # Hundreds of hosts cannot all do that at the same moment, so large runs use
 # this image instead: the templates see TPUMS_HOME and skip both steps.
 #
-# The environment is built the way the McJAX template builds it at start (uv,
-# a fresh venv, `uv pip install`), so a run from this image and a run that
-# installs at start have the same packages. PIP_FREEZE.txt lists them.
+# The two runtimes install into different Python environments when they
+# install at start, and the image keeps both, so that a run from this image
+# has the packages of a run that installs at start:
+#
+#   * McJAX (automation/jobset_template.yaml): a fresh uv venv, here
+#     $TPUMS_VENV, which the template activates. PIP_FREEZE.mcjax.txt lists
+#     its packages.
+#   * Pathways client (templates/pathways_jobset.py): the Python of the client
+#     image, which also has the TensorFlow that reads the XProf traces of the
+#     Pathways workers. PIP_FREEZE.pathways.txt lists its packages.
 #
 #   gcloud builds submit --project <project> \
 #     --config automation/k8s/cloudbuild_workload.yaml \
@@ -16,15 +23,23 @@ ARG BASE_IMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
 FROM ${BASE_IMAGE}
 ARG TPUMS_COMMIT=unknown
 COPY . /opt/tpums
+WORKDIR /opt/tpums
+# McJAX environment.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && export PATH="/root/.local/bin:${PATH}" \
     && uv venv /opt/tpums-venv \
     && . /opt/tpums-venv/bin/activate \
-    && uv pip install '/opt/tpums[pathways]' \
-    && uv pip freeze > /opt/tpums/PIP_FREEZE.txt \
-    && echo "${TPUMS_COMMIT}" > /opt/tpums/GIT_COMMIT \
+    && uv pip install . \
+    && uv pip freeze > /opt/tpums/PIP_FREEZE.mcjax.txt \
     && tpums --help > /dev/null
+# Pathways client environment. The last line fails the build if the Python
+# that runs `tpums` cannot import what core/pathways.py reads worker traces
+# with: without it, a Pathways run has no device times.
+RUN pip install -q -e '.[pathways]' \
+    && pip freeze > /opt/tpums/PIP_FREEZE.pathways.txt \
+    && tpums --help > /dev/null \
+    && "$(sed -n '1s/^#!//p' "$(command -v tpums)")" -c \
+      'from tensorflow.io import gfile; from tensorflow.python.profiler.internal import _pywrap_profiler_plugin'
+RUN echo "${TPUMS_COMMIT}" > /opt/tpums/GIT_COMMIT
 ENV TPUMS_HOME=/opt/tpums \
-    VIRTUAL_ENV=/opt/tpums-venv \
-    PATH=/opt/tpums-venv/bin:${PATH}
-WORKDIR /opt/tpums
+    TPUMS_VENV=/opt/tpums-venv

@@ -595,6 +595,37 @@ def generate_pathways_manifest(
   return yaml.safe_dump(pathways_jobset_obj.to_dict(), sort_keys=False)
 
 
+# Container flag that sets a Pathways binary's debugging overrides.
+_DEBUG_OVERRIDE_FLAG = "--temporary_flags_for_debugging="
+
+
+def manifest_debug_overrides(manifest_yaml: str) -> str:
+  """Returns the debugging overrides a JobSet manifest sets, or "".
+
+  A Pathways binary takes them through --temporary_flags_for_debugging (see
+  `templates/pathways_jobset.py`). They are read from the manifest that is
+  submitted, so that the provenance says what ran.
+
+  Args:
+    manifest_yaml: The JobSet manifest.
+
+  Returns:
+    `<container>: <flag>` of every container that sets the flag, joined with
+    `runtimes.DEBUG_OVERRIDES_SEPARATOR`.
+  """
+  doc = yaml.safe_load(manifest_yaml) or {}
+  found: list[str] = []
+  for job in (doc.get("spec") or {}).get("replicatedJobs") or []:
+    pod = ((job.get("template") or {}).get("spec") or {}).get("template") or {}
+    spec = pod.get("spec") or {}
+    containers = (spec.get("initContainers") or []) + (spec.get("containers") or [])
+    for container in containers:
+      for arg in container.get("args") or []:
+        if str(arg).startswith(_DEBUG_OVERRIDE_FLAG):
+          found.append(f"{container.get('name', '')}: {arg}")
+  return runtimes_lib.DEBUG_OVERRIDES_SEPARATOR.join(dict.fromkeys(found))
+
+
 def generate_jobset_manifest(
     workload_name: str,
     namespace: str,
@@ -1423,6 +1454,9 @@ class WorkloadManager:
         topo_info = utils.compute_topology_info(topology, accelerator=acc)
         # DCN benchmarks run on several slices of `topology`.
         num_slices = utils.config_num_slices(rel_path)
+        # Own copy: debugging overrides and pod image digests are recorded
+        # per workload.
+        workload_provenance = dict(provenance)
         render_manifest: Optional[Callable[[str], str]] = None
         if runtime.is_pathways:
 
@@ -1456,6 +1490,19 @@ class WorkloadManager:
           manifest = render_manifest(workload_name)
           # The Pathways head pod plus one pod per TPU host of every slice.
           total_pods = topo_info["num_nodes"] * num_slices + 1
+          debug_overrides = manifest_debug_overrides(manifest)
+          if debug_overrides:
+            logging.warning(
+                "Workload [%s] (%s, %s) runs with a debugging override, which"
+                " the reports will list: %s",
+                workload_name,
+                config_name,
+                runtime.name,
+                debug_overrides,
+            )
+            workload_provenance[runtimes_lib.DEBUG_OVERRIDES_KEY] = (
+                debug_overrides
+            )
         else:
           manifest = generate_jobset_manifest(
               workload_name=workload_name,
@@ -1495,7 +1542,7 @@ class WorkloadManager:
                   duration_seconds=0.0,
                   gcs_artifact_path=gcs_output_dir,
                   runtime=runtime.name,
-                  provenance=provenance,
+                  provenance=workload_provenance,
               )
           )
           continue
@@ -1510,8 +1557,7 @@ class WorkloadManager:
             start_time=time.time(),
             total_pods=total_pods,
             runtime=runtime.name,
-            # Own copy: pod image digests are recorded per workload.
-            provenance=dict(provenance),
+            provenance=workload_provenance,
             fixed_name=runtime.is_pathways,
             base_name=workload_name,
             render_manifest=render_manifest,

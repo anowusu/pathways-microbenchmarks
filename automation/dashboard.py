@@ -5,7 +5,11 @@ assets, so it renders straight from GCS) with:
 
 * the night's JobSets and their outcome, one cell each;
 * per benchmark, grouped bars of the p50 step time of every runtime (solid:
-  XProf device time, hollow: wall clock as the JAX client sees it);
+  XProf device time, hollow: wall clock as the JAX client sees it), in two
+  groups: benchmarks within one slice, and collectives between slices over
+  the data center network (DCN);
+* a note naming every workload that ran with a debugging override (see
+  templates/pathways_jobset.py), and a dagger on each of its bars;
 * a Pathways / McJAX ratio heat map per case (device time and wall clock);
 * per benchmark, achieved throughput (bandwidth or TFLOP/s).
 
@@ -20,6 +24,8 @@ import logging
 import subprocess
 from typing import Any
 
+from automation import runtime_comparison
+from automation import runtimes as runtimes_lib
 from automation import utils
 
 DASHBOARD_FILE = "dashboard.html"
@@ -32,8 +38,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <title>__TITLE__</title>
 <style>
-  :root { color-scheme: light dark; --bg: #f8fafc; --card: #ffffff; --fg: #0f172a; --muted: #64748b; --border: #e2e8f0; --mutedbg: #f1f5f9; --accent: #2563eb; --good: #16a34a; --goodbg: #dcfce7; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #0b0f17; --card: #151c28; --fg: #f1f5f9; --muted: #94a3b8; --border: #263142; --mutedbg: #1e293b; --accent: #3b82f6; --good: #4ade80; --goodbg: #14532d; } }
+  :root { color-scheme: light dark; --bg: #f8fafc; --card: #ffffff; --fg: #0f172a; --muted: #64748b; --border: #e2e8f0; --mutedbg: #f1f5f9; --accent: #2563eb; --good: #16a34a; --goodbg: #dcfce7; --warn: #b45309; --warnbg: #fef3c7; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0f17; --card: #151c28; --fg: #f1f5f9; --muted: #94a3b8; --border: #263142; --mutedbg: #1e293b; --accent: #3b82f6; --good: #4ade80; --goodbg: #14532d; --warn: #fbbf24; --warnbg: #422006; } }
   * { box-sizing: border-box; }
   body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
   .wrap { max-width: 1180px; margin: 0 auto; }
@@ -59,6 +65,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .panel-wide { grid-column: 1 / -1; }
   .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 2px; flex-wrap: wrap; }
   .panel-title { font-size: 15px; font-weight: 650; }
+  .sec-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin: 2px 0 10px; }
+  .sec-gap { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
+  .callout { border: 1px solid var(--warn); background: var(--warnbg); border-radius: 10px; padding: 10px 14px; margin: 0 0 14px; font-size: 13px; }
+  .callout .tag { color: var(--warn); font-weight: 700; }
+  .callout code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .warn-note { color: var(--warn); font-weight: 600; }
   .dir { font-size: 11.5px; font-weight: 600; color: var(--good); }
   .panel-sub { font-size: 12.5px; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
   .case-pills { display: inline-flex; background: var(--mutedbg); border: 1px solid var(--border); border-radius: 7px; padding: 2px; gap: 2px; }
@@ -90,6 +102,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <div class="callout" id="overrides" style="display:none"></div>
     <div class="bar-ctrl">
       <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
         <div class="seg" role="tablist" aria-label="Metric">
@@ -105,7 +118,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
       </div>
       <div class="muted" id="mode-hint"></div>
     </div>
+    <div class="sec-head" id="ici-head"><h2>Within one slice · ICI collectives and on-chip benchmarks</h2></div>
     <div id="charts" class="grid2"></div>
+    <div id="dcn-section" class="sec-gap" style="display:none">
+      <div class="sec-head"><h2>Between slices · collectives over the data center network (DCN)</h2></div>
+      <div class="muted" id="dcn-sub" style="margin-bottom:10px">Device time is the execution of the XLA module on JAX device 0, which includes the transfer between slices. Transfers over the network vary more from run to run than work within a slice: compare runtimes on the trend below, not on one run.</div>
+      <div id="dcn-charts" class="grid2"></div>
+    </div>
   </div>
 
   <div class="card" id="history-card">
@@ -138,6 +157,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 const ROWS = __ROWS__;
 const JOBSETS = __JOBSETS__;
 const HISTORY = __HISTORY__;
+const OVERRIDES = __OVERRIDES__;
 const COLORS = { mcjax: "#3b82f6", louhi: "#f59e0b", rapid: "#10b981" };
 const PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#8b5cf6", "#ef4444", "#06b6d4"];
 const RT_META = {
@@ -147,19 +167,19 @@ const RT_META = {
 };
 const BENCH_META = {
   AllGatherBenchmark: {
-    title: "All-Gather · Combine data across 32 chips",
-    what: "Each chip shares its piece so all 32 chips get the full tensor",
+    title: "All-Gather · Combine data across {scope}",
+    what: "Each chip shares its piece so every chip gets the full tensor",
     unit: "Network speed (GB/s per chip)",
     axisTitle: "Data size per chip (bfloat16)",
   },
   AllReduceBenchmark: {
-    title: "All-Reduce · Sum data across 32 chips",
-    what: "Adds tensors across all 32 chips and returns the sum to every chip",
+    title: "All-Reduce · Sum data across {scope}",
+    what: "Adds tensors across all chips and returns the sum to every chip",
     unit: "Network speed (GB/s per chip)",
     axisTitle: "Data size per chip (bfloat16)",
   },
   AllToAllBenchmark: {
-    title: "All-to-All · Shuffle data across 32 chips",
+    title: "All-to-All · Shuffle data across {scope}",
     what: "Every chip sends a distinct slice to every other chip",
     unit: "Network speed (GB/s per chip)",
     axisTitle: "Data size per chip (bfloat16)",
@@ -176,11 +196,37 @@ const BENCH_META = {
     unit: "Memory speed (GB/s per chip)",
     axisTitle: "Buffer size copied per chip",
   },
+  DcnAllReduceBenchmark: {
+    title: "DCN All-Reduce · Sum data across {scope}",
+    what: "Adds tensors across the chips of every slice; the data crosses the data center network",
+    unit: "Network speed (Gbps per host)",
+    axisTitle: "Data size per device (bfloat16)",
+  },
+  DcnAllToAllBenchmark: {
+    title: "DCN All-to-All · Shuffle data across {scope}",
+    what: "Every chip sends a distinct piece of its data to the chips of the other slices",
+    unit: "Network speed (Gbps per host)",
+    axisTitle: "Data size per device (bfloat16)",
+  },
 };
+// DCN benchmarks (registered as Dcn*) run between slices and get their own section.
+const isDcn = b => /^Dcn/.test(b || "");
+// "the 4x8 slice", or "2 × 4x8 slices" for a benchmark that runs between slices.
+const scopeOf = rows => {
+  const r = rows.find(q => q.topology) || rows[0] || {};
+  const n = Number(r.replica_group_rank || 0);
+  if (isDcn(r.benchmark)) return r.topology ? `${n || 2} × ${r.topology} slices` : "slices";
+  return r.topology ? `the ${r.topology} slice` : "the slice";
+};
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// The debugging overrides a row's workload ran with ("" for a supported configuration).
+const overrideOf = r => r.pathways_debug_overrides || "";
 const RT = [...new Set(ROWS.map(r => r.runtime || "mcjax"))].sort((a, b) => (a === "mcjax" ? -1 : b === "mcjax" ? 1 : a.localeCompare(b)));
 const COLOR = Object.fromEntries(RT.map((rt, i) => [rt, COLORS[rt] || PALETTE[i % PALETTE.length]]));
 const rtName = rt => (RT_META[rt] && RT_META[rt].name) || rt;
 const BENCH = [...new Set(ROWS.map(r => r.benchmark))];
+const ICI_BENCH = BENCH.filter(b => !isDcn(b));
+const DCN_BENCH = BENCH.filter(isDcn);
 const CASE_KEYS = ["matrix_dim", "num_elements", "data_size_mib", "m", "k", "n", "shard_size_mib", "dtype", "in_dtype", "out_dtype", "src_device_index", "dst_device_index", "mesh_shape", "sharding_strategy"];
 const num = v => (v === "" || v == null) ? null : Number(v);
 const sig5 = v => (v == null || v === "" || Number.isNaN(Number(v))) ? "–" : Number(v).toPrecision(5);
@@ -217,10 +263,12 @@ const thr = r => {
     ["xprof_tflops_per_chip", "TFLOP/s", false],
     ["xprof_bandwidth_per_chip_gb_s", "GB/s", false],
     ["xprof_bandwidth_per_device_gb_s", "GB/s", false],
+    ["xprof_bandwidth_per_host_gbps", "Gbps/host", false],
     ["wall_clock_tflops_per_device", "TFLOP/s (wall)", true],
     ["wall_clock_tflops_per_chip", "TFLOP/s (wall)", true],
     ["wall_clock_bandwidth_per_chip_gb_s", "GB/s (wall)", true],
     ["wall_clock_bandwidth_per_device_gb_s", "GB/s (wall)", true],
+    ["wall_clock_bandwidth_per_host_gbps", "Gbps/host (wall)", true],
   ];
   for (const [k, u, w] of pairs) if (num(r[k]) != null) return { v: num(r[k]), u, wall: w };
   return null;
@@ -233,6 +281,25 @@ const hover = (el, text) => { el.addEventListener("mousemove", e => showTip(e, t
 
 // Legend
 document.getElementById("legend").innerHTML = RT.map(rt => `<span><span class="sw" style="background:${COLOR[rt]}"></span>${rtName(rt)}</span>`).join("");
+
+// Debugging overrides: one note per override, naming who ran what with it.
+(function() {
+  if (!OVERRIDES.length) return;
+  const groups = {};
+  OVERRIDES.forEach(o => {
+    const k = o.container + "|" + o.override;
+    const g = groups[k] = groups[k] || { container: o.container, override: o.override, effect: o.effect, runtimes: [], benchmarks: [] };
+    if (!g.runtimes.includes(o.runtime)) g.runtimes.push(o.runtime);
+    if (!g.benchmarks.includes(o.benchmark)) g.benchmarks.push(o.benchmark);
+  });
+  const el = document.getElementById("overrides");
+  el.innerHTML = Object.values(groups).map(g =>
+    `<span class="tag">Debugging override in effect.</span> ${g.runtimes.map(rt => esc(rtName(rt))).join(" and ")} ran ` +
+    `${g.benchmarks.map(b => esc(b.replace(/Benchmark$/, ""))).join(", ")} with <code>${esc(g.override)}</code>` +
+    `${g.container ? ` on the <code>${esc(g.container)}</code> container` : ""}. ${esc(g.effect)} Its bars are marked †.`
+  ).join("<br><br>");
+  el.style.display = "block";
+})();
 
 let currentMode = "thr";
 let currentStat = "p50";
@@ -253,11 +320,14 @@ const thrAt = (r, st = currentStat) => {
 function renderKpis() {
   const st = STAT_LABEL[currentStat];
   const baseByKey = {};
-  ROWS.filter(r => (r.runtime || "mcjax") === "mcjax").forEach(r => baseByKey[r.benchmark + "|" + caseKey(r)] = r);
+  // The headline compares the cases within one slice. DCN cases vary too much
+  // from run to run to fold into one figure; they count only if nothing else ran.
+  const kpiRows = ROWS.some(r => !isDcn(r.benchmark)) ? ROWS.filter(r => !isDcn(r.benchmark)) : ROWS;
+  kpiRows.filter(r => (r.runtime || "mcjax") === "mcjax").forEach(r => baseByKey[r.benchmark + "|" + caseKey(r)] = r);
   const kpiEl = document.getElementById("kpis");
   kpiEl.innerHTML = "";
   RT.forEach(rt => {
-    const rtRows = ROWS.filter(r => (r.runtime || "mcjax") === rt);
+    const rtRows = kpiRows.filter(r => (r.runtime || "mcjax") === rt);
     const meta = RT_META[rt] || { name: rt, desc: "" };
     let headline = `${rtRows.length} cases measured`;
     let badgeText = "Baseline";
@@ -287,7 +357,7 @@ function renderKpis() {
       badgeText = geo >= 0.97 ? "Matches McJAX" : `${pct}% vs McJAX`;
     }
     let sub = meta.desc;
-    let tipText = `<b>${meta.name}</b>\n${meta.desc}`;
+    let tipText = `<b>${meta.name}</b>\n${meta.desc}` + (DCN_BENCH.length && ICI_BENCH.length ? "\nFigures cover the cases within one slice, not the DCN cases." : "");
     const medOf = arr => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
     if (rt === "mcjax" && hostGaps.length) {
       const medGap = medOf(hostGaps);
@@ -347,15 +417,17 @@ const MODE_HINTS = {
   wall: "Total bar = Python end-to-end wait time. Solid bottom = TPU chip time; striped top = overhead outside the TPU (McJAX: local CPU-TPU sync; Louhi/Rapid: CPU sync + Pathways proxy hop).",
 };
 
-function renderPanel(bench, mode) {
+function renderPanel(bench, mode, group) {
   const st = STAT_LABEL[currentStat];
   const rows = ROWS.filter(r => r.benchmark === bench);
-  const meta = BENCH_META[bench] || {
+  const meta = { ...(BENCH_META[bench] || {
     title: bench.replace(/Benchmark$/, ""),
     what: "",
     unit: (rows.map(thr).find(Boolean) || { u: "Speed" }).u,
     axisTitle: "Workload size",
-  };
+  }) };
+  meta.title = meta.title.replace("{scope}", scopeOf(rows));
+  const overrideRuntimes = [...new Set(rows.filter(overrideOf).map(r => r.runtime || "mcjax"))];
   const keys = [...new Set(rows.map(caseKey))];
   const labels = {};
   const sortNum = {};
@@ -366,7 +438,7 @@ function renderPanel(bench, mode) {
   });
   keys.sort((a, b) => sortNum[a] - sortNum[b]);
 
-  const isWide = keys.length >= 4 || (BENCH.length % 2 === 1 && BENCH.indexOf(bench) === BENCH.length - 1);
+  const isWide = keys.length >= 4 || (group.length % 2 === 1 && group.indexOf(bench) === group.length - 1);
   const hasSub = keys.some(k => labels[k].sub);
   const W = isWide ? 1060 : 540, H = hasSub ? 248 : 234, left = 42, right = 12, top = 20, bottom = hasSub ? 56 : 42;
   const svg = svgEl("svg", { width: "100%", viewBox: `0 0 ${W} ${H}` });
@@ -442,7 +514,8 @@ function renderPanel(bench, mode) {
       const tt = `<b>${meta.title.split(" · ")[0]} · ${rtName(rt)}</b>\nSize: ${labels[key].main} ${labels[key].sub ? "(" + labels[key].sub + ")" : ""}` +
         (t ? `\nHardware speed (${st}): <b>${sig5(t.v)} ${t.u}</b>` : "") +
         devStats + wallStats + overheadLine +
-        (slice(r) ? `\nTPU slice: ${slice(r)}` : "");
+        (slice(r) ? `\nTPU slice: ${slice(r)}` : "") +
+        (overrideOf(r) ? `\n† Debugging override: ${esc(overrideOf(r))}` : "");
 
       if (mode === "wall" && dev != null && wall != null && wall > dev) {
         svg.appendChild(hover(svgEl("rect", { x: xBar, y: yv(wall), width: barW, height: yv(dev) - yv(wall), fill: `url(#stripe-${bench}-${rt})`, stroke: COLOR[rt], "stroke-width": 1, rx: 3 }), tt));
@@ -451,7 +524,7 @@ function renderPanel(bench, mode) {
         const isWallFallback = (mode === "thr" && t && t.wall) || (mode === "dev" && dev == null);
         svg.appendChild(hover(svgEl("rect", { x: xBar, y: yv(v), width: barW, height: Math.max(yv(0) - yv(v), 2), fill: isWallFallback ? `url(#stripe-${bench}-${rt})` : COLOR[rt], stroke: COLOR[rt], "stroke-width": isWallFallback ? 1 : 0, rx: 3 }), tt));
       }
-      svg.appendChild(svgEl("text", { x: xBar + barW / 2, y: Math.max(yv(v) - 6, 11), class: "val-lbl", "text-anchor": "middle" }, fmtVal(v)));
+      svg.appendChild(svgEl("text", { x: xBar + barW / 2, y: Math.max(yv(v) - 6, 11), class: "val-lbl", "text-anchor": "middle" }, fmtVal(v) + (overrideOf(r) ? " †" : "")));
     });
   });
   svg.appendChild(svgEl("text", { x: left + (W - left - right) / 2, y: H - 4, class: "lbl", "text-anchor": "middle" }, meta.axisTitle));
@@ -460,7 +533,10 @@ function renderPanel(bench, mode) {
   const dirLabel = mode === "thr" ? "↑ Higher is better" : "↓ Lower is better";
   const wrap = document.createElement("div");
   wrap.className = isWide ? "panel panel-wide" : "panel";
-  wrap.innerHTML = `<div class="panel-head"><span class="panel-title">${meta.title}</span><span class="dir">${dirLabel}</span></div><div class="panel-sub"><span>${meta.what ? meta.what + " · " : ""}<b>${unitLabel}</b></span></div>`;
+  const overrideNote = overrideRuntimes.length
+    ? `<span class="warn-note">† ${overrideRuntimes.map(rt => esc(rtName(rt))).join(", ")}: debugging override, see the note at the top</span>`
+    : "";
+  wrap.innerHTML = `<div class="panel-head"><span class="panel-title">${meta.title}</span><span class="dir">${dirLabel}</span></div><div class="panel-sub"><span>${meta.what ? meta.what + " · " : ""}<b>${unitLabel}</b></span>${overrideNote}</div>`;
   wrap.appendChild(svg);
   return wrap;
 }
@@ -643,7 +719,7 @@ function renderHistory() {
     `Showing ${runs.length} of ${allRuns.length} recorded run${allRuns.length === 1 ? "" : "s"} (${runs[0].run_id} → ${runs[runs.length - 1].run_id}) using the Metric and Statistic selected above. Click a size pill on any chart to switch workload size.`;
   const container = document.getElementById("history-charts");
   container.innerHTML = "";
-  for (const b of BENCH) container.appendChild(renderHistoryPanel(b, currentMode, runs));
+  for (const b of [...ICI_BENCH, ...DCN_BENCH]) container.appendChild(renderHistoryPanel(b, currentMode, runs));
 }
 
 function setHistoryWin(w) { currentHistoryWin = w; renderHistory(); }
@@ -659,11 +735,21 @@ function refreshAll() {
   renderKpis();
   const container = document.getElementById("charts");
   container.innerHTML = "";
-  for (const b of BENCH) container.appendChild(renderPanel(b, currentMode));
+  for (const b of ICI_BENCH) container.appendChild(renderPanel(b, currentMode, ICI_BENCH));
+  document.getElementById("ici-head").style.display = ICI_BENCH.length ? "" : "none";
+  const dcnSection = document.getElementById("dcn-section");
+  dcnSection.style.display = DCN_BENCH.length ? "" : "none";
+  dcnSection.className = ICI_BENCH.length ? "sec-gap" : "";
+  const dcnContainer = document.getElementById("dcn-charts");
+  dcnContainer.innerHTML = "";
+  for (const b of DCN_BENCH) dcnContainer.appendChild(renderPanel(b, currentMode, DCN_BENCH));
   renderHistory();
 }
 function setMode(m) { currentMode = m; refreshAll(); }
 function setStat(s) { currentStat = s; refreshAll(); }
+// A #thr, #dev or #wall in the URL opens the page on that metric, e.g.
+// dashboard.html#wall for device time stacked under wall-clock time.
+if (["thr", "dev", "wall"].includes(location.hash.slice(1))) currentMode = location.hash.slice(1);
 refreshAll();
 
 // When opened via https://storage.cloud.google.com/..., GCS 302-redirects the
@@ -711,7 +797,8 @@ _ROW_KEYS = (
     "xprof_bandwidth_per_chip_gb_s", "wall_clock_bandwidth_per_chip_gb_s",
     "xprof_bandwidth_per_device_gb_s", "wall_clock_bandwidth_per_device_gb_s",
     "xprof_bandwidth_per_host_gbps", "wall_clock_bandwidth_per_host_gbps",
-    "replica_group_rank",
+    "replica_group_rank", "topology",
+    runtimes_lib.DEBUG_OVERRIDES_KEY,
     "xprof_tflops_per_device", "wall_clock_tflops_per_device",
     "xprof_tflops_per_chip", "wall_clock_tflops_per_chip",
     "node_pools", "pathways_server_digest", "client_image_digest", "git_commit",
@@ -887,6 +974,12 @@ def render_dashboard(
       .replace("__ROWS__", json.dumps(rows))
       .replace("__JOBSETS__", json.dumps(jobsets))
       .replace("__HISTORY__", json.dumps(history_payload))
+      .replace(
+          "__OVERRIDES__",
+          json.dumps(
+              runtime_comparison.debug_override_summary(categorized_metrics)
+          ),
+      )
   )
 
 

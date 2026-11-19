@@ -41,8 +41,13 @@ _IMAGE = "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
 # containers with glibc >= 2.35 (see op_flags.yaml); glibc reads it at process
 # start.
 _DCN_GLIBC_TUNABLES = "glibc.pthread.rseq=0"
-# libtpu's flag for the enhanced launch barrier (see `pathways_op_flags`).
+# libtpu's flag for the enhanced launch barrier, and the resource manager
+# debugging override that turning it off needs (see
+# `resource_manager_debug_overrides`).
 _BARRIER_FLAG = "--xla_tpu_use_enhanced_launch_barrier"
+_RM_DEBUG_FLAG = "--temporary_flags_for_debugging"
+_RM_DEBUG_SEPARATOR = ";;;"
+_LATE_BINDING_OFF = "temporary_flag_for_debugging_enable_late_binding=false"
 _DCN_BENCHMARK_PREFIX = "dcn_"
 _DEFAULT_DCN_NUM_SLICES = 2
 # Results (summary.csv, detailed.json, git_commit.txt, execution.log) go to
@@ -52,7 +57,9 @@ _RUN = """set -o pipefail
 git clone --depth 1 --branch "$TPUMS_REF" "$TPUMS_REPO" /tmp/tpums
 cd /tmp/tpums && pip install -q -e '.[pathways]' && mkdir -p /tmp/results
 git rev-parse HEAD > /tmp/results/git_commit.txt
-tpums benchmark run-config "$TPUMS_CONFIG" --output_dir=/tmp/results \\
+tpums benchmark run-config "$TPUMS_CONFIG" \\
+    ${TPUMS_OP_FLAGS_FILE:+--xla_flags_file_path="$TPUMS_OP_FLAGS_FILE"} \\
+    --output_dir=/tmp/results \\
     --xprof_dir="$GCS_XPROF_DIR" 2>&1 | tee /tmp/results/execution.log
 rc=$?
 gcloud storage cp /tmp/results/* "$GCS_RESULTS_DIR/"
@@ -115,26 +122,42 @@ def benchmark_op_flags(
   return flags, env
 
 
-def pathways_op_flags(flags: list[str]) -> list[str]:
-  """Returns the op flags as Pathways on Cloud can run them.
+def resource_manager_debug_overrides(flags: list[str]) -> list[str]:
+  """Returns the debugging overrides the resource manager needs for `flags`.
 
-  One flag cannot be passed on as it is: op_flags.yaml turns the enhanced
-  launch barrier off for dcn_all_reduce
+  op_flags.yaml turns the enhanced launch barrier off for dcn_all_reduce
   (--xla_tpu_use_enhanced_launch_barrier=false). Whether the barrier is on is
-  part of the slice topology a worker reports, and the resource manager of
-  the Pathways on Cloud images only accepts workers that have it on ("The
-  newly added slice topology is not expected by the resource manager", then
-  the resource manager exits). No supported flag changes that, so the workers
-  and the proxy keep the barrier on. It is the one libtpu flag that differs
-  from a McJAX run of the same benchmark.
+  part of the slice topology a worker reports. The resource manager of the
+  Pathways on Cloud images always expects it on, and exits when the workers
+  report anything else ("The newly added slice topology is not expected by
+  the resource manager"). No flag changes what it expects: not libtpu's flag
+  on its command line, and not --pathways_tpu_use_enhanced_launch_barrier,
+  which the cloud build does not pass on when it creates that topology.
+
+  The resource manager only checks worker topologies while late binding is
+  on, so such a benchmark runs with late binding off. The Pathways on Cloud
+  binaries refuse non-default --pathways_* flags; the one way to turn it off
+  is the resource manager's --temporary_flags_for_debugging. With late
+  binding off the client gets its devices only after the workers have
+  joined. The proxy still compiles and the workers still execute with the
+  same flags as a McJAX run, and all_gather times the same with and without
+  the override.
+
+  This is a debugging configuration, not a supported one. The automation
+  records it in the workload's provenance (`pathways_debug_overrides`), and
+  the reports and the dashboard list every workload that ran with it.
 
   Args:
-    flags: The op flags of the benchmark (op_flags.yaml or an override file).
+    flags: The op flags the workers and the proxy run with.
+
+  Returns:
+    `key=value` overrides for --temporary_flags_for_debugging, or [].
   """
-  return [
-      f"{_BARRIER_FLAG}=true" if flag.partition("=")[0] == _BARRIER_FLAG else flag
-      for flag in flags
-  ]
+  for flag in flags:
+    name, _, value = flag.partition("=")
+    if name == _BARRIER_FLAG and value.lower() in ("false", "0"):
+      return [_LATE_BINDING_OFF]
+  return []
 
 
 def default_num_slices(config_path: str) -> int:
@@ -211,8 +234,8 @@ def build_pathways_jobset(
   # LIBTPU_INIT_ARGS. On Pathways the proxy compiles and the workers execute,
   # so both take the flags on their command line (the open-source binaries
   # forward --xla_* and --megascale_* flags to libtpu). The resource manager
-  # takes none of them.
-  flags = pathways_op_flags(flags)
+  # takes none of them, only the debugging override some of them call for.
+  rm_overrides = resource_manager_debug_overrides(flags)
   worker_kwargs: dict[str, Any] = {}
   if flags:
     worker_kwargs["args"] = flags
@@ -239,6 +262,11 @@ def build_pathways_jobset(
       labels=labels or None,
       head_pod_spec_kwargs=pod_spec_kwargs,
       worker_pod_spec_kwargs=pod_spec_kwargs,
+      rm_container_kwargs=(
+          {"args": [f"{_RM_DEBUG_FLAG}={_RM_DEBUG_SEPARATOR.join(rm_overrides)}"]}
+          if rm_overrides
+          else None
+      ),
       proxy_container_kwargs={"args": flags} if flags else None,
       worker_container_kwargs=worker_kwargs or None,
   )
@@ -249,6 +277,9 @@ def build_pathways_jobset(
           "TPUMS_REPO": repo,
           "TPUMS_REF": ref,
           "TPUMS_CONFIG": config,
+          # The client records the op flags of the run in its results, so it
+          # reads the same op flags file as the workers and the proxy.
+          "TPUMS_OP_FLAGS_FILE": op_flags_file or "",
           "GCS_DIR": gcs_dir,
           "GCS_RESULTS_DIR": results_dir or f"{gcs_dir}/results",
           "GCS_XPROF_DIR": xprof_dir or f"{gcs_dir}/xprof",

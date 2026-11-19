@@ -40,6 +40,13 @@ CASE_COLUMNS: dict[str, tuple[str, ...]] = {
         "dtype",
         "matrix_dim",
     ),
+    "dcn_collectives": (
+        "benchmark",
+        "topology",
+        "replica_group_rank",
+        "dtype",
+        "matrix_dim",
+    ),
     "hbm": ("benchmark", "dtype", "num_elements", "data_size_mib"),
     "host_device": ("benchmark", "dtype", "data_size_mib", "transfer_backend"),
     "device_to_device": (
@@ -57,10 +64,12 @@ CASE_COLUMNS: dict[str, tuple[str, ...]] = {
 _THROUGHPUT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("xprof_bandwidth_per_chip_gb_s", "GB/s/chip"),
     ("xprof_bandwidth_per_device_gb_s", "GB/s/device"),
+    ("xprof_bandwidth_per_host_gbps", "Gbps/host"),
     ("xprof_tflops_per_device", "TFLOP/s/device"),
     ("xprof_tflops_per_chip", "TFLOP/s/chip"),
     ("wall_clock_bandwidth_per_chip_gb_s", "GB/s/chip (wall)"),
     ("wall_clock_bandwidth_per_device_gb_s", "GB/s/device (wall)"),
+    ("wall_clock_bandwidth_per_host_gbps", "Gbps/host (wall)"),
     ("wall_clock_tflops_per_device", "TFLOP/s/device (wall)"),
     ("wall_clock_tflops_per_chip", "TFLOP/s/chip (wall)"),
 )
@@ -78,6 +87,28 @@ COMPARISON_HEADERS: tuple[str, ...] = (
     "xprof",
     "vs_mcjax",
     "slice",
+    "notes",
+)
+
+# Note of a row whose workload ran with a debugging override (the row's
+# `runtimes.DEBUG_OVERRIDES_KEY` column, stamped by the aggregator).
+DEBUG_OVERRIDE_NOTE = "debugging override"
+# What a known override does, for the reports. Keyed by the `key=value` the
+# flag carries; see templates/pathways_jobset.py for the full story.
+DEBUG_OVERRIDE_EFFECTS: dict[str, str] = {
+    "temporary_flag_for_debugging_enable_late_binding=false": (
+        "Late binding is off in the Pathways resource manager, so that it"
+        " accepts workers that run without the enhanced launch barrier"
+        " (--xla_tpu_use_enhanced_launch_barrier=false, which op_flags.yaml"
+        " sets for this benchmark and McJAX runs with). The stock resource"
+        " manager otherwise exits when such workers join. With late binding"
+        " off, the client gets its devices only after the workers have"
+        " joined. This is a debugging configuration, not a supported one."
+    ),
+}
+_UNKNOWN_OVERRIDE_EFFECT = (
+    "Not described in runtime_comparison.DEBUG_OVERRIDE_EFFECTS. A debugging"
+    " configuration, not a supported one."
 )
 
 
@@ -225,6 +256,11 @@ def build_comparison(
             "xprof": _xprof_status(row),
             "vs_mcjax": _ratio(row, baseline),
             "slice": _tpu_slice(row),
+            "notes": (
+                DEBUG_OVERRIDE_NOTE
+                if row.get(runtimes_lib.DEBUG_OVERRIDES_KEY)
+                else ""
+            ),
         })
     tables.append(
         ComparisonTable(
@@ -235,6 +271,52 @@ def build_comparison(
         )
     )
   return tables
+
+
+def debug_override_summary(
+    categorized_metrics: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, str]]:
+  """Returns the debugging overrides of the run, one row per use.
+
+  Args:
+    categorized_metrics: Aggregated rows per category.
+
+  Returns:
+    One `{runtime, benchmark, container, override, effect}` row per runtime,
+    benchmark and override, sorted by runtime then benchmark; empty when no
+    workload ran with a debugging override.
+  """
+  seen: dict[tuple[str, str, str, str], dict[str, str]] = {}
+  for rows in categorized_metrics.values():
+    for row in rows:
+      value = str(row.get(runtimes_lib.DEBUG_OVERRIDES_KEY) or "")
+      if not value:
+        continue
+      runtime = str(row.get("runtime") or BASELINE_RUNTIME)
+      benchmark = str(row.get("benchmark") or "")
+      for entry in value.split(runtimes_lib.DEBUG_OVERRIDES_SEPARATOR):
+        # `<container>: <flag>=<key=value>[;;;<key=value>...]`
+        container, _, flag = entry.strip().partition(": ")
+        flag_name, _, payload = flag.partition("=")
+        for override in filter(None, payload.split(";;;")):
+          seen.setdefault(
+              (runtime, benchmark, container, override),
+              {
+                  "runtime": runtime,
+                  "benchmark": benchmark,
+                  "container": container,
+                  "override": f"{flag_name}={override}",
+                  "effect": DEBUG_OVERRIDE_EFFECTS.get(
+                      override, _UNKNOWN_OVERRIDE_EFFECT
+                  ),
+              },
+          )
+  return [
+      seen[key]
+      for key in sorted(
+          seen, key=lambda k: (runtimes_lib.runtime_sort_key(k[0]), k[1:])
+      )
+  ]
 
 
 def runtime_provenance_summary(

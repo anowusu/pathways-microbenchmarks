@@ -247,6 +247,11 @@ def row_to_record(
         "proxy_server_image": row.get("pathways_proxy_image", ""),
         "proxy_digest": row.get("pathways_proxy_digest", ""),
     }
+    if row.get(runtimes_lib.DEBUG_OVERRIDES_KEY):
+      # Not part of the case: `pathways_*` columns stay out of the case id.
+      params["pathways"]["debug_overrides"] = row[
+          runtimes_lib.DEBUG_OVERRIDES_KEY
+      ]
   total_devices = _int(row.get("total_devices"))
   chips_per_node = 4 if accelerator in ("v5e", "v6e", "tpu7x") else None
   num_nodes = (

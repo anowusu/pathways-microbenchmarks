@@ -142,6 +142,14 @@ def _gcloud_json(args: Sequence[str]) -> Any:
   return json.loads(proc.stdout or "null")
 
 
+# Provenance key, and aggregated row column, of the debugging overrides a
+# workload ran with (see templates/pathways_jobset.py): `<container>: <flag>`
+# entries joined by the separator. Empty or absent for a supported
+# configuration.
+DEBUG_OVERRIDES_KEY = "pathways_debug_overrides"
+DEBUG_OVERRIDES_SEPARATOR = ", "
+
+
 def resolve_image_provenance(image_ref: str) -> dict[str, Any]:
   """Resolves a tagged image to its digest and the tags sharing that digest.
 

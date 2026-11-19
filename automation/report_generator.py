@@ -88,6 +88,14 @@ def _has_runtime_matrix(
   )
 
 
+_DEBUG_OVERRIDES_INTRO = (
+    "The workloads below did not run in a supported Pathways configuration:"
+    " a container was started with a debugging override. Their rows are"
+    f" marked `{runtime_comparison.DEBUG_OVERRIDE_NOTE}` in the comparison"
+    " tables."
+)
+
+
 def _runtime_sections_markdown(
     categorized_metrics: dict[str, list[dict[str, Any]]],
 ) -> list[str]:
@@ -99,6 +107,16 @@ def _runtime_sections_markdown(
   if provenance:
     headers = list(dict.fromkeys(k for row in provenance for k in row))
     lines += ["## Runtimes", "", *_markdown_table(headers, provenance), ""]
+  overrides = runtime_comparison.debug_override_summary(categorized_metrics)
+  if overrides:
+    lines += [
+        "## Debugging overrides",
+        "",
+        f"*{_DEBUG_OVERRIDES_INTRO}*",
+        "",
+        *_markdown_table(list(overrides[0]), overrides),
+        "",
+    ]
   tables = runtime_comparison.build_comparison(categorized_metrics)
   if tables:
     lines += [
@@ -107,7 +125,8 @@ def _runtime_sections_markdown(
         (
             "*`vs_mcjax` is the step-time ratio to McJAX on the same case: XProf"
             " device time when both runtimes have it, else wall clock."
-            " `xprof` says whether device timings were captured.*"
+            " `xprof` says whether device timings were captured. `notes` marks"
+            " rows that ran with a debugging override.*"
         ),
         "",
     ]
@@ -131,6 +150,7 @@ def _runtime_sections_html(
       categorized_metrics
   )
   tables = runtime_comparison.build_comparison(categorized_metrics)
+  overrides = runtime_comparison.debug_override_summary(categorized_metrics)
   if not provenance and not tables:
     return lines
   lines.append('    <div class="section">')
@@ -145,6 +165,15 @@ def _runtime_sections_html(
         ' 16px;">Runtimes</h3>'
     )
     lines.extend(_html_table(headers, provenance, " " * 6))
+  if overrides:
+    lines.append(
+        '      <h3 style="margin-top: 24px; margin-bottom: 6px; font-size:'
+        ' 16px;">Debugging overrides</h3>'
+    )
+    lines.append(
+        f'      <p class="desc-text">{html.escape(_DEBUG_OVERRIDES_INTRO)}</p>'
+    )
+    lines.extend(_html_table(list(overrides[0]), overrides, " " * 6))
   if tables:
     lines.append(
         '      <p class="desc-text">vs_mcjax is the step-time ratio to McJAX'

@@ -183,18 +183,15 @@ class WorkloadNamingTest(parameterized.TestCase):
     worker_container = worker["template"]["spec"]["template"]["spec"]["containers"][0]
     env = {e["name"]: e.get("value") for e in worker_container["env"]}
     self.assertEqual(env["GLIBC_TUNABLES"], "glibc.pthread.rseq=0")
-    # The op flags reach the workers and the proxy. Pathways on Cloud only
-    # accepts workers with the enhanced launch barrier on, so the one flag
-    # op_flags.yaml sets otherwise for dcn_all_reduce is turned back on.
+    # The op flags reach the workers and the proxy as they are, the enhanced
+    # launch barrier off included (what the resource manager needs for that
+    # is in test_debug_overrides.py).
     proxy = next(c for c in head_spec["initContainers"] if c["name"] == "pathways-proxy")
     for container in (worker_container, proxy):
       self.assertIn(
-          "--xla_tpu_use_enhanced_launch_barrier=true",
+          "--xla_tpu_use_enhanced_launch_barrier=false",
           container["args"],
           container["name"],
-      )
-      self.assertNotIn(
-          "--xla_tpu_use_enhanced_launch_barrier=false", container["args"]
       )
       self.assertIn("--megascale_max_reduction_shard_size=16777216", container["args"])
       # v5e hosts cannot hold op_flags.yaml's 128 GiB premap: op_flags/v5e.yaml.
@@ -203,15 +200,10 @@ class WorkloadNamingTest(parameterized.TestCase):
           container["args"],
           container["name"],
       )
-    # The resource manager keeps its own arguments and takes no op flag, and
-    # nothing overrides what it expects of the workers.
+    # The resource manager keeps its own arguments and takes no op flag.
     self.assertIn("--instance_type=tpuv5e:4x8", rm["args"])
     self.assertFalse(
-        [
-            a
-            for a in rm["args"]
-            if a.startswith(("--xla_", "--megascale_", "--pathways_", "--temporary_"))
-        ]
+        [a for a in rm["args"] if a.startswith(("--xla_", "--megascale_", "--pathways_"))]
     )
 
   @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")

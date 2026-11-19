@@ -29,7 +29,7 @@ about 20 minutes.
 gs://cloud-pathways-staging/tpums-nightly/
 ├── <YYYY-MM-DD>/
 │   ├── <runtime>/<config>/            summary.csv, detailed.json, execution*.log,
-│   │                                  git_commit.txt, provenance.json, XProf traces
+│   │                                  git_commit.txt, provenance.json, jobset.yaml, XProf traces
 │   │                                  (McJAX: tensorboard/, Pathways: xprof/),
 │   │                                  pathways/ (Pathways scratch: compilation cache)
 │   ├── aggregated_results/<category>.csv   one CSV per benchmark class, all runtimes
@@ -60,6 +60,10 @@ shows the following:
 To view the page, open it from the object page in the Google Cloud console
 (**Authenticated URL**) or download it. To see the p90, the mean, the
 throughput, and the slice of a bar, hold the pointer over the bar.
+
+`jobset.yaml` is the JobSet manifest as the driver submitted it, so that a
+run can be read back and repeated. A retry replaces the file with the
+manifest of the new attempt.
 
 `provenance.json` records the git commit of the benchmark code, the node
 pools the pods ran on (`node_pools`; GKE names TPU slice nodes

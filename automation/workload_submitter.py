@@ -1053,17 +1053,16 @@ def _delete_existing_jobset(
 
 
 PROVENANCE_FILE = "provenance.json"
+# The JobSet manifest as it was submitted, next to the results it produced.
+MANIFEST_FILE = "jobset.yaml"
 
 
-def upload_provenance(gcs_output_dir: str, provenance: dict[str, Any]) -> None:
-  """Writes `provenance.json` next to a workload's results; failures are logged."""
-  if not gcs_output_dir or not provenance:
-    return
-  target = utils.format_gcs_uri(gcs_output_dir, PROVENANCE_FILE)
+def _upload_text(target: str, text: str) -> None:
+  """Writes `text` to the GCS object `target`; failures are logged."""
   try:
     proc = subprocess.run(
         ["gcloud", "storage", "cp", "-", target],
-        input=json.dumps(provenance, indent=2, sort_keys=True),
+        input=text,
         capture_output=True,
         text=True,
         check=False,
@@ -1075,6 +1074,31 @@ def upload_provenance(gcs_output_dir: str, provenance: dict[str, Any]) -> None:
   if proc.returncode != 0:
     logging.warning(
         "Could not upload %s: %s", target, (proc.stderr or "").strip()
+    )
+
+
+def upload_provenance(
+    gcs_output_dir: str,
+    provenance: dict[str, Any],
+    manifest_yaml: Optional[str] = None,
+) -> None:
+  """Writes the record of a workload next to its results; failures are logged.
+
+  Args:
+    gcs_output_dir: `gs://` directory of the workload's results.
+    provenance: Written as `provenance.json`.
+    manifest_yaml: The JobSet manifest as submitted, written as `jobset.yaml`,
+      so that a run can be read back and repeated exactly. A retry overwrites
+      it with the manifest of the new attempt.
+  """
+  if not gcs_output_dir:
+    return
+  if manifest_yaml:
+    _upload_text(utils.format_gcs_uri(gcs_output_dir, MANIFEST_FILE), manifest_yaml)
+  if provenance:
+    _upload_text(
+        utils.format_gcs_uri(gcs_output_dir, PROVENANCE_FILE),
+        json.dumps(provenance, indent=2, sort_keys=True),
     )
 
 
@@ -1833,7 +1857,7 @@ class WorkloadManager:
       wl.start_time = time.time()
       wl.workload_name = apply_jobset(wl.manifest_yaml)
       key = wl.workload_name
-      upload_provenance(wl.gcs_output_dir, wl.provenance)
+      upload_provenance(wl.gcs_output_dir, wl.provenance, wl.manifest_yaml)
       wl.uploaded_provenance = dict(wl.provenance)
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.error("Failed to apply JobSet %s: %s", name, e)

@@ -382,7 +382,7 @@ class RetryTest(absltest.TestCase):
   def test_failed_workload_is_resubmitted_once(
       self, mock_jobsets, mock_pods, mock_apply, mock_delete, mock_delete_existing, mock_upload
   ):
-    del mock_pods, mock_upload  # Unused.
+    del mock_pods  # Unused.
     mock_apply.side_effect = lambda manifest: manifest.split("name: ")[1]
     retry_name = "tpums-rapid-all-gat-r2"
     completed_retry = {retry_name: {"status": {"conditions": [
@@ -408,6 +408,35 @@ class RetryTest(absltest.TestCase):
         [c.args[0] for c in mock_delete_existing.call_args_list],
         ["tpums-rapid-all-gather", retry_name],
     )
+    # Each attempt archives the manifest it submitted next to the results.
+    self.assertEqual(
+        [c.args[2] for c in mock_upload.call_args_list if len(c.args) > 2],
+        [c.args[0] for c in mock_apply.call_args_list],
+    )
+
+  def test_upload_provenance_archives_the_submitted_manifest(self):
+    uploads = {}
+
+    def fake_run(cmd, **kwargs):
+      uploads[cmd[-1]] = kwargs["input"]
+      return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with mock.patch.object(subprocess, "run", side_effect=fake_run):
+      workload_submitter.upload_provenance("gs://b/run/louhi/gemm", {"runtime": "louhi"}, "kind: JobSet\n")
+      # Without a manifest (the later re-upload of the digests) only the
+      # provenance is written again.
+      workload_submitter.upload_provenance("gs://b/run/mcjax/gemm", {"runtime": "mcjax"})
+      workload_submitter.upload_provenance("", {"runtime": "mcjax"}, "kind: JobSet\n")
+    self.assertEqual(
+        set(uploads),
+        {
+            "gs://b/run/louhi/gemm/jobset.yaml",
+            "gs://b/run/louhi/gemm/provenance.json",
+            "gs://b/run/mcjax/gemm/provenance.json",
+        },
+    )
+    self.assertEqual(uploads["gs://b/run/louhi/gemm/jobset.yaml"], "kind: JobSet\n")
+    self.assertEqual(json.loads(uploads["gs://b/run/louhi/gemm/provenance.json"]), {"runtime": "louhi"})
 
   @mock.patch.object(workload_submitter, "upload_provenance")
   @mock.patch.object(workload_submitter, "_delete_existing_jobset")

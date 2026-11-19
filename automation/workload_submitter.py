@@ -40,6 +40,19 @@ import yaml
 DEFAULT_TICK_INTERVAL_SECONDS = int(
     os.environ.get("TPUMS_TICK_INTERVAL_SECONDS", "15")
 )
+
+# Order in which the JobSets of a run are submitted (TPUMS_DISPATCH_ORDER):
+# `runtime` (default) submits every config of the first runtime, then the next
+# runtime; `config` submits every runtime of the first config, then the next
+# config, so that with as many JobSets in flight as there are runtimes, the
+# runtimes run the same benchmark at the same time.
+DISPATCH_ORDERS = ("runtime", "config")
+DISPATCH_ORDER = os.environ.get("TPUMS_DISPATCH_ORDER", "runtime")
+if DISPATCH_ORDER not in DISPATCH_ORDERS:
+  raise ValueError(
+      f"TPUMS_DISPATCH_ORDER is {DISPATCH_ORDER!r}; choose from"
+      f" {', '.join(DISPATCH_ORDERS)}."
+  )
 # Above this many JobSets, a label selector naming each one gets unwieldy and
 # the pods of the whole namespace are listed instead.
 _MAX_JOBSETS_IN_POD_SELECTOR = 40
@@ -1798,7 +1811,25 @@ class WorkloadManager:
             render_manifest=render_manifest,
         )
 
+    if DISPATCH_ORDER == "config":
+      self._order_pending_by_config(config_files)
     return dry_run_results
+
+  def _order_pending_by_config(self, config_files: list[pathlib.Path]) -> None:
+    """Reorders the pending workloads: every runtime of a config, then the next."""
+    config_index = {
+        _package_relative_path(config): i for i, config in enumerate(config_files)
+    }
+    runtime_index = {runtime.name: i for i, runtime in enumerate(self.runtimes)}
+    self.pending_workloads = dict(
+        sorted(
+            self.pending_workloads.items(),
+            key=lambda item: (
+                config_index.get(item[1].config_rel_path, len(config_index)),
+                runtime_index.get(item[1].runtime, len(runtime_index)),
+            ),
+        )
+    )
 
   def _in_flight(self) -> int:
     return sum(1 for wl in self.active_workloads.values() if not wl.terminal)

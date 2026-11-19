@@ -120,6 +120,17 @@ The image records the commit in the `/opt/tpums/GIT_COMMIT` file.
     failed and submits it again. Use this label for a run that can wait, such
     as a smoke test.
 
+1.  Optional: To run the runtimes side by side on the same benchmark, submit
+    the JobSets by config, and let as many JobSets run at the same time as
+    there are runtimes:
+
+    ```bash
+    export TPUMS_DISPATCH_ORDER=config
+    ```
+
+    By default, the driver submits every config of the first runtime, and
+    then the configs of the next runtime.
+
 1.  Run the driver:
 
     ```bash

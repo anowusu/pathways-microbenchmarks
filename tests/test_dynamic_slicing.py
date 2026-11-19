@@ -501,6 +501,29 @@ class NamesAndRetriesTest(absltest.TestCase):
         "mb-mcjax-all-gather",
     )
 
+  @absltest.skipUnless(_HAS_PATHWAYSUTILS, "pathwaysutils not installed")
+  @mock.patch.object(utils, "DEFAULT_CLUSTER_PROFILE", _DYNAMIC)
+  @mock.patch.object(runtimes, "runtime_provenance", return_value={"git_commit": "c"})
+  def test_dispatch_order(self, _):
+    configs = [_CONFIGS / "4x4x8" / "all_gather.yaml", _CONFIGS / "4x4x8" / "gemm.yaml"]
+
+    def submitted():
+      manager = workload_submitter.WorkloadManager(runtimes=[runtimes.LOUHI, runtimes.RAPID])
+      manager.prepare_workloads(configs)
+      return [(wl.config_name, wl.runtime) for wl in manager.pending_workloads.values()]
+
+    # By default every config of a runtime, then the next runtime.
+    self.assertEqual(
+        submitted(),
+        [("all_gather", "louhi"), ("gemm", "louhi"), ("all_gather", "rapid"), ("gemm", "rapid")],
+    )
+    # By config: the runtimes run the same benchmark side by side.
+    with mock.patch.object(workload_submitter, "DISPATCH_ORDER", "config"):
+      self.assertEqual(
+          submitted(),
+          [("all_gather", "louhi"), ("all_gather", "rapid"), ("gemm", "louhi"), ("gemm", "rapid")],
+      )
+
   @mock.patch.object(utils, "DEFAULT_CLUSTER_PROFILE", _DYNAMIC)
   @mock.patch.object(
       runtimes, "runtime_provenance", return_value={"runtime": "mcjax", "git_commit": "c"}

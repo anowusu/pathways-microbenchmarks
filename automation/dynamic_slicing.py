@@ -20,7 +20,9 @@ of 16 hosts, and Kueue's topology-aware scheduling composes the slice a
 workload asks for out of whole cubes:
 
 * the JobSet, the TPU job and its pods carry the slice topology in the
-  `cloud.google.com/gke-tpu-slice-topology` annotation;
+  `cloud.google.com/gke-tpu-slice-topology` annotation, and the pods still
+  select `cloud.google.com/gke-tpu-topology`: the cluster rejects TPU pods
+  without that selector, and the nodes of a composed slice get the label;
 * the pods carry Kueue's pod-set annotations (one topology block, slices of
   one cube: 16 pods);
 * every pod uses the host network, like the validated JobSets of these
@@ -54,9 +56,12 @@ _PODSET_ANNOTATIONS = {
 # but it can be slower, which a benchmark must not measure by accident.
 _CUBE_STATE_LABEL = "cloud.google.com/gke-tpu-partition-4x4x4-state"
 _CUBE_STATE = "HEALTHY"
+# The cluster's admission policy rejects pods that request TPUs without this
+# node selector ("tpu-accelerator-topology-constraints"); the nodes of the
+# slice Kueue composes carry the label.
+_TOPOLOGY_NODE_SELECTOR = "cloud.google.com/gke-tpu-topology"
 # Node selector keys of a standard cluster that no node has here.
 _STANDARD_NODE_SELECTORS = (
-    "cloud.google.com/gke-tpu-topology",
     "cloud.google.com/placement-policy-name",
     "cloud.google.com/reservation-name",
 )
@@ -184,6 +189,7 @@ def apply(
     node_selector = dict(spec.get("nodeSelector") or {})
     for key in _STANDARD_NODE_SELECTORS:
       node_selector.pop(key, None)
+    node_selector[_TOPOLOGY_NODE_SELECTOR] = topology
     node_selector[_CUBE_STATE_LABEL] = _CUBE_STATE
     spec["nodeSelector"] = node_selector
     tolerations = list(spec.get("tolerations") or [])

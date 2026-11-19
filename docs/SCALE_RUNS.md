@@ -31,7 +31,7 @@ JobSets of both runtimes (`automation/dynamic_slicing.py`):
 
 | Part of the JobSet | Standard cluster | Dynamic slicing cluster |
 |---|---|---|
-| Slice selection | `cloud.google.com/gke-tpu-topology` node selector | `cloud.google.com/gke-tpu-slice-topology` annotation on the JobSet, the TPU job, and the pods, plus the Kueue pod-set annotations |
+| Slice selection | `cloud.google.com/gke-tpu-topology` node selector | `cloud.google.com/gke-tpu-slice-topology` annotation on the JobSet, the TPU job, and the pods, plus the Kueue pod-set annotations. The pods keep the `cloud.google.com/gke-tpu-topology` node selector, because the cluster rejects TPU pods without the selector. |
 | Cubes | Not applicable | Only cubes whose state is `HEALTHY` |
 | Network | McJAX pods use the host network | Every pod uses the host network, the Pathways head included |
 | McJAX JobSet name | Generated: `tpums-<topology>-mcjax-<config>-<suffix>` | Fixed: `<prefix>-mcjax-<config>` |

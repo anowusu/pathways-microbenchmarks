@@ -145,6 +145,8 @@ class McjaxManifestTest(absltest.TestCase):
         spec["nodeSelector"],
         {
             "cloud.google.com/gke-tpu-accelerator": "tpu7x",
+            # The cluster rejects TPU pods without the topology selector.
+            "cloud.google.com/gke-tpu-topology": "8x8x16",
             "cloud.google.com/gke-tpu-partition-4x4x4-state": "HEALTHY",
         },
     )
@@ -227,6 +229,8 @@ class PathwaysManifestTest(absltest.TestCase):
         spec["nodeSelector"],
         {
             "cloud.google.com/gke-tpu-accelerator": "tpu7x",
+            # The cluster rejects TPU pods without the topology selector.
+            "cloud.google.com/gke-tpu-topology": "8x8x16",
             "cloud.google.com/gke-tpu-partition-4x4x4-state": "HEALTHY",
         },
     )

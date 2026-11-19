@@ -80,6 +80,11 @@ that the driver submitted. The aggregator stamps these onto every row as the
 `runtime`, `pathways_server_digest`, `pathways_debug_overrides`,
 `client_image_digest`, `node_pools`, … columns.
 
+For a Pathways workload, `provenance.json` also records the node of the head
+pod (`pathways_head_node`). The client, the proxy, and the resource manager
+run there, on a CPU node that other pods share, so the node is part of what
+a Pathways wall-clock time measures.
+
 BigQuery: `cloud-tpu-multipod-dev.tpums_nightly.run_summary_microbenchmarks`
 (created on first write) uses uBench's `MicrobenchmarkSchema` column names, so
 rows can be copied into uBench's tables later. `run_name` / `run_group` are

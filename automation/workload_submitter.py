@@ -1303,22 +1303,46 @@ def pod_node_pools(pod_list: list[dict[str, Any]]) -> list[str]:
   return sorted(pools)
 
 
+_PATHWAYS_HEAD_LABEL = ("jobset.sigs.k8s.io/replicatedjob-name", "pathways-head")
+
+
+def pathways_head_node(pod_list: list[dict[str, Any]]) -> str:
+  """Returns the node of the Pathways head pod ("" for a JobSet without one).
+
+  The client, the proxy and the resource manager run in the head pod, on a
+  CPU node that other pods share, so the node is part of what a Pathways
+  wall-clock time measures.
+  """
+  key, value = _PATHWAYS_HEAD_LABEL
+  for pod in pod_list:
+    if (pod.get("metadata", {}).get("labels") or {}).get(key) == value:
+      node = pod.get("spec", {}).get("nodeName") or ""
+      if node:
+        return node
+  return ""
+
+
 def record_pod_placement(
     wl: ActiveWorkload, pod_list: list[dict[str, Any]]
 ) -> bool:
-  """Records the node pools of `pod_list` in `wl.provenance`; True if changed."""
+  """Records where the pods of `pod_list` run in `wl.provenance`; True if changed.
+
+  `node_pools` gets the node pools of all pods, and `pathways_head_node` the
+  node of the Pathways head.
+  """
+  changed = False
   pools = pod_node_pools(pod_list)
-  if not pools:
-    return False
-  known = set(str(wl.provenance.get("node_pools", "")).split(","))
-  merged = ",".join(sorted(set(pools) | (known - {""})))
-  if merged == wl.provenance.get("node_pools"):
-    return False
-  wl.provenance["node_pools"] = merged
-  return True
-
-
-_PATHWAYS_HEAD_LABEL = ("jobset.sigs.k8s.io/replicatedjob-name", "pathways-head")
+  if pools:
+    known = set(str(wl.provenance.get("node_pools", "")).split(","))
+    merged = ",".join(sorted(set(pools) | (known - {""})))
+    if merged != wl.provenance.get("node_pools"):
+      wl.provenance["node_pools"] = merged
+      changed = True
+  head = pathways_head_node(pod_list)
+  if head and head != wl.provenance.get("pathways_head_node"):
+    wl.provenance["pathways_head_node"] = head
+    changed = True
+  return changed
 
 
 def pathways_head_restarts(pod_list: list[dict[str, Any]]) -> list[str]:

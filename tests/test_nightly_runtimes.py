@@ -563,6 +563,25 @@ class PodDigestTest(absltest.TestCase):
         "gke-pw-scale-test-v5e-32-default-pool-ddc42050,gke-tpu-31dbadc5",
     )
     self.assertFalse(workload_submitter.record_pod_placement(wl, pods))
+    # A JobSet without a Pathways head (McJAX) records no head node.
+    self.assertNotIn("pathways_head_node", wl.provenance)
+    # The node of the Pathways head: its CPU node is shared with other pods,
+    # and the client's wall-clock times are taken there.
+    head = {
+        "metadata": {"labels": {"jobset.sigs.k8s.io/replicatedjob-name": "pathways-head"}},
+        "spec": {"nodeName": "gke-pw-scale-test-v5e-32-default-pool-ddc42050-0kwu"},
+    }
+    worker = {
+        "metadata": {"labels": {"jobset.sigs.k8s.io/replicatedjob-name": "pathways-worker"}},
+        "spec": {"nodeName": "gke-tpu-31dbadc5-jt36"},
+    }
+    self.assertEqual(workload_submitter.pathways_head_node([worker]), "")
+    self.assertTrue(workload_submitter.record_pod_placement(wl, [worker, head]))
+    self.assertEqual(
+        wl.provenance["pathways_head_node"],
+        "gke-pw-scale-test-v5e-32-default-pool-ddc42050-0kwu",
+    )
+    self.assertFalse(workload_submitter.record_pod_placement(wl, [worker, head]))
     # The comparison shows the TPU slice, not the CPU pool of the head.
     self.assertEqual(
         runtime_comparison._tpu_slice({"node_pools": wl.provenance["node_pools"]}),

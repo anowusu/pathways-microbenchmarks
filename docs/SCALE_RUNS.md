@@ -11,6 +11,9 @@ The pipeline is the one that [NIGHTLY_RUNTIMES.md](NIGHTLY_RUNTIMES.md)
 describes: the same driver, the same benchmarks, and the same reports. This
 page covers what differs.
 
+A scale run is a one-time run that you start by hand from a workstation. No
+CronJob runs it, and the hourly run stays on the standard cluster.
+
 ## Limitations
 
 *   A slice topology needs three dimensions that are multiples of 4, smallest
